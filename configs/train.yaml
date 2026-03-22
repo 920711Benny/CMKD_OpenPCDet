@@ -1,0 +1,15 @@
+seed: 42
+batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 2.0e-4
+weight_decay: 0.01
+num_epochs: 1
+num_workers: 2
+log_every: 10
+save_every: 200
+train_split: train
+val_split: val
+image_size: 224
+lang_loss_weight: 0.3
+action_loss_weight: 1.0
+mixed_precision: fp16
