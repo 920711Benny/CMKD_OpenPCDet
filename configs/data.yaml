@@ -1,0 +1,7 @@
+dataset_id: immanuelpeter/carla-autopilot-multimodal-dataset
+image_column: image_front
+speed_column: speed_kmh
+throttle_column: throttle
+steer_column: steer
+brake_column: brake
+command_column: command

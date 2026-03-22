@@ -1,0 +1,10 @@
+torch>=2.2
+transformers>=4.45
+datasets>=2.20
+accelerate>=0.34
+peft>=0.12
+pillow>=10.0
+tqdm>=4.66
+pyyaml>=6.0
+numpy>=1.26
+scikit-learn>=1.5

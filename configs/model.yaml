@@ -1,0 +1,10 @@
+vision_model: openai/clip-vit-base-patch32
+llm_model: Qwen/Qwen2.5-1.5B-Instruct
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+projector_hidden_dim: 1024
+action_head_hidden_dim: 1024
+max_text_length: 160
