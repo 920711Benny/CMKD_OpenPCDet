@@ -22,7 +22,7 @@ import torch
 
 from ..carla_agent.controller import TrajectoryController
 from ..data.augment import cut_bottom_quarter, resize_nn, to_chw_normalized
-from ..data.synthetic import COMMAND_TO_ID, generate_frame
+from ..data.carla_surrogate import COMMAND_TO_ID, generate_frame
 from ..losses.consistency import compute_dynamics
 from ..models.coc_prompt import INTENTS
 
@@ -75,7 +75,8 @@ def _predict(model, cfg, frames, device):
 # ---------------------------------------------------------------------------
 def gate_steering_distribution(model, cfg, device, n=64, min_separation=0.25,
                                min_polarity_rate=0.75) -> GateResult:
-    batches = _scenario_batch(["left_turn", "right_turn"], cfg, n, seed=11)
+    batches = _scenario_batch(["SignalizedJunctionLeftTurn",
+                               "SignalizedJunctionRightTurn"], cfg, n, seed=11)
     ctrl = TrajectoryController(dt=cfg["model"].get("waypoint_dt", 0.2))
     stats = {}
     for name, frames in batches.items():
@@ -91,13 +92,14 @@ def gate_steering_distribution(model, cfg, device, n=64, min_separation=0.25,
             "mean_lateral_m": float(wps[:, -1, 1].mean()),
         }
         # CARLA sign: steer < 0 turns left.
-        want_negative = name == "left_turn"
+        want_negative = name.endswith("LeftTurn")
         correct = (steers < 0) if want_negative else (steers > 0)
         stats[name]["correct_polarity_rate"] = float(correct.mean())
 
-    sep = stats["right_turn"]["mean_steer"] - stats["left_turn"]["mean_steer"]
-    pol = min(stats["left_turn"]["correct_polarity_rate"],
-              stats["right_turn"]["correct_polarity_rate"])
+    left, right = "SignalizedJunctionLeftTurn", "SignalizedJunctionRightTurn"
+    sep = stats[right]["mean_steer"] - stats[left]["mean_steer"]
+    pol = min(stats[left]["correct_polarity_rate"],
+              stats[right]["correct_polarity_rate"])
     passed = sep >= min_separation and pol >= min_polarity_rate
     return GateResult(
         name="steering distribution (left/right turn queries)",
@@ -121,7 +123,9 @@ def gate_red_light_stop(model, cfg, device, n=64, max_final_speed=0.5,
     only pass a vehicle that was already stationary. What must hold is that the
     trajectory ENDS at rest and that no throttle is commanded on the way.
     """
-    batches = _scenario_batch(["red_light", "green_light"], cfg, n, seed=23)
+    # noScenarios is the control: a model that simply always brakes must not pass.
+    batches = _scenario_batch(["OppositeVehicleRunningRedLight", "noScenarios"],
+                              cfg, n, seed=23)
     ctrl = TrajectoryController(dt=cfg["model"].get("waypoint_dt", 0.2))
     res = {}
     for name, frames in batches.items():
@@ -138,7 +142,7 @@ def gate_red_light_stop(model, cfg, device, n=64, max_final_speed=0.5,
             "mean_target_speed_ms": float(np.mean([c.target_speed for c in ctrls])),
             "mean_displacement_m": float(dyn.displacement.mean()),
         }
-    red, green = res["red_light"], res["green_light"]
+    red, green = res["OppositeVehicleRunningRedLight"], res["noScenarios"]
     passed = (red["mean_final_speed_ms"] <= max_final_speed
               and red["throttle_rate"] <= max_throttle_rate
               and green["mean_final_speed_ms"] > red["mean_final_speed_ms"])
@@ -148,7 +152,7 @@ def gate_red_light_stop(model, cfg, device, n=64, max_final_speed=0.5,
         detail=(f"red: final_speed={red['mean_final_speed_ms']:.3f} m/s "
                 f"(need <={max_final_speed}), stopped_rate={red['stopped_rate']:.2f}, "
                 f"throttle_rate={red['throttle_rate']:.2f} (need <={max_throttle_rate}); "
-                f"green control: final_speed={green['mean_final_speed_ms']:.3f} m/s "
+                f"clear-road control: final_speed={green['mean_final_speed_ms']:.3f} m/s "
                 f"(must exceed red)"),
         metrics=res,
     )
@@ -160,7 +164,7 @@ def gate_red_light_stop(model, cfg, device, n=64, max_final_speed=0.5,
 def gate_diffusion_latency(model, cfg, device, iters=30, warmup=5,
                            budget_ms=80.0, max_spread_m=1.0, repeats=8) -> GateResult:
     m = cfg["model"]
-    frames = _scenario_batch(["free_flow"], cfg, 1, seed=7)["free_flow"]
+    frames = _scenario_batch(["noScenarios"], cfg, 1, seed=7)["noScenarios"]
     img = torch.from_numpy(
         _prep(frames[0], m["image_size"], cfg["data"].get("cut_bottom_quarter", True))
     )[None].to(device)

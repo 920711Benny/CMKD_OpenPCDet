@@ -23,7 +23,7 @@ from ..carla_agent.controller import TrajectoryController
 from ..carla_agent.hud import HUDState, PygameHUD
 from ..carla_agent.sensors import CameraRig
 from ..data.augment import cut_bottom_quarter, resize_nn, to_chw_normalized
-from ..data.synthetic import generate_frame
+from ..data.carla_surrogate import generate_frame
 
 
 def main():

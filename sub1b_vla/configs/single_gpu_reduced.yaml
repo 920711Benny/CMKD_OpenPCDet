@@ -7,13 +7,14 @@
 #   python -m sub1b_vla.tools.compute_budget --config <cfg> --dataset-frames N
 # to get the number for your own dataset and measured throughput.
 #
-# This config trades scope for a run that finishes in a day or two. Every
+# This config keeps SimLingo's 15 epochs and trades DATA VOLUME instead, so the
+# optimisation schedule is unchanged and only the corpus is smaller. Every
 # deviation from the SimLingo-matched recipe is listed here, because a result
 # obtained under these settings is NOT comparable to a full-recipe run and the
 # difference must be reported alongside any benchmark table:
 #
-#   1. max_epochs 15 -> 4            fewer passes over the data
-#   2. dataset subsampled            see data.max_records / bucket weighting
+#   1. max_epochs stays at 15        (unchanged from the matched recipe)
+#   2. dataset subsampled            data.max_records = 150k of ~3.3M frames
 #   3. image_size 224 kept           (unchanged; do not shrink without saying so)
 #   4. vision backbones frozen       (already true in the default recipe; SimLingo
 #                                     trains its vision encoder, freeze: False)
@@ -84,10 +85,17 @@ data:
   # SimLingo-style dataset mixing. `driving` = expert trajectories,
   # `drivecot` = QA/commentary (language only), `dreamer` = instruction
   # following, including instructions that must be REFUSED on safety grounds.
+  # 60% Chain-of-Thought supervision, as specified for this thesis. The
+  # remaining 40% splits between expert trajectories and instruction following.
+  # `drivecot` covers SimLingo's commentary + DriveLM VQA; `dreamer` is
+  # instruction following. Note the trade-off: only `driving` and `dreamer`
+  # carry trajectory targets, so a 60% CoT mix means 40% of each batch trains
+  # the diffusion head. The 2:8 long-tail split is applied WITHIN those types,
+  # so trajectory supervision stays long-tail-weighted despite the smaller share.
   train_partitions:
-    driving: 0.45
-    drivecot: 0.30
-    dreamer: 0.25
+    driving: 0.25
+    drivecot: 0.60
+    dreamer: 0.15
   drivecot_weight: 0.4            # shorthand fallback if train_partitions is unset
   use_safety_flag: true
   easy_hard_split_2to8: true      # 20% easy / 80% long-tail
@@ -105,9 +113,12 @@ data:
   use_qa: true
   qa_augmentation: true
   max_text_len: 96
-  max_records: 400000             # subsample the manifest (0 = use all)
-  synthetic: false                # true => procedural data, no disk required
-  synthetic_size: 512
+  max_records: 150000             # subsample the manifest (0 = use all)
+  # CARLA-schema surrogate frames (carla_surrogate.py). Real training must
+  # use the prepared SimLingo manifests; the surrogate is for code paths,
+  # atomic gates and CI only.
+  carla_surrogate: false
+  surrogate_size: 512
 
 train:
   # Optimiser settings mirror SimLingo's DrivingModelConfig / simlingo_seed1.yaml
@@ -126,7 +137,7 @@ train:
   num_workers: 8
   # Epoch-based like SimLingo (max_epochs: 15). max_steps caps a run when you
   # want a fixed budget; set it to 0 to run purely by epochs.
-  max_epochs: 4
+  max_epochs: 15
   max_steps: 0
   lr: 1.0e-4
   min_lr: 1.0e-7

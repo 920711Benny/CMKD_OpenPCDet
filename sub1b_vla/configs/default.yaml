@@ -61,10 +61,17 @@ data:
   # SimLingo-style dataset mixing. `driving` = expert trajectories,
   # `drivecot` = QA/commentary (language only), `dreamer` = instruction
   # following, including instructions that must be REFUSED on safety grounds.
+  # 60% Chain-of-Thought supervision, as specified for this thesis. The
+  # remaining 40% splits between expert trajectories and instruction following.
+  # `drivecot` covers SimLingo's commentary + DriveLM VQA; `dreamer` is
+  # instruction following. Note the trade-off: only `driving` and `dreamer`
+  # carry trajectory targets, so a 60% CoT mix means 40% of each batch trains
+  # the diffusion head. The 2:8 long-tail split is applied WITHIN those types,
+  # so trajectory supervision stays long-tail-weighted despite the smaller share.
   train_partitions:
-    driving: 0.45
-    drivecot: 0.30
-    dreamer: 0.25
+    driving: 0.25
+    drivecot: 0.60
+    dreamer: 0.15
   drivecot_weight: 0.4            # shorthand fallback if train_partitions is unset
   use_safety_flag: true
   easy_hard_split_2to8: true      # 20% easy / 80% long-tail
@@ -82,8 +89,11 @@ data:
   use_qa: true
   qa_augmentation: true
   max_text_len: 96
-  synthetic: false                # true => procedural data, no disk required
-  synthetic_size: 512
+  # CARLA-schema surrogate frames (carla_surrogate.py). Real training must
+  # use the prepared SimLingo manifests; the surrogate is for code paths,
+  # atomic gates and CI only.
+  carla_surrogate: false
+  surrogate_size: 512
 
 train:
   # Optimiser settings mirror SimLingo's DrivingModelConfig / simlingo_seed1.yaml

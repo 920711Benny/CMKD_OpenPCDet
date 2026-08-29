@@ -31,7 +31,7 @@ import torch
 
 from ..data.augment import cut_bottom_quarter, resize_nn, to_chw_normalized
 from ..data.instructions import UNSAFE_IN_SCENARIO, sample_instruction
-from ..data.synthetic import generate_frame
+from ..data.carla_surrogate import generate_frame
 from ..losses.consistency import action_cot_alignment_score
 from ..models.coc_prompt import INTENT_TO_ID
 

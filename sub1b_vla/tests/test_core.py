@@ -387,20 +387,63 @@ def test_augmentation_is_disabled_for_val_split(cfg):
     assert not DrivingVLADataset(cfg, "val").aug.enabled
 
 
-def test_synthetic_red_light_implies_stop_label():
-    from sub1b_vla.data.synthetic import generate_frame
+def test_surrogate_red_light_implies_stop_label():
+    from sub1b_vla.data.carla_surrogate import generate_frame
 
     rng = np.random.default_rng(0)
     seen = 0
     for _ in range(400):
         f = generate_frame(rng)
-        if f.scenario == "red_light":
+        if f.scenario == "OppositeVehicleRunningRedLight":
             seen += 1
             assert f.coc.intent == "stop"
             # A stop must come to REST by the horizon; it may cover ground doing so.
             seg = np.linalg.norm(np.diff(np.vstack([[0, 0], f.waypoints]), axis=0), axis=1)
             assert seg[-1] / 0.2 < 0.3, "a stop trajectory must end at rest"
-    assert seen > 0, "red_light scenario never sampled"
+            assert "leading_object_traffic.traffic_light" in f.buckets
+    assert seen > 0, "red-light scenario never sampled"
+
+
+def test_surrogate_speaks_carla_vocabulary():
+    """Every field a surrogate frame carries must be CARLA's own vocabulary, so
+    swapping in the real dataset changes pixels and not field names."""
+    from sub1b_vla.data.carla_buckets import SIMLINGO_TRAIN_PARTITIONS
+    from sub1b_vla.data.carla_surrogate import (
+        COMMANDS, SCENARIOS, TOWNS, WEATHER_PRESETS, generate_frame,
+    )
+
+    rng = np.random.default_rng(3)
+    for _ in range(200):
+        f = generate_frame(rng)
+        assert f.scenario in SCENARIOS
+        assert f.town in TOWNS
+        assert f.weather in WEATHER_PRESETS
+        assert 0 <= f.command < len(COMMANDS)
+        assert f.buckets and all(b in SIMLINGO_TRAIN_PARTITIONS for b in f.buckets)
+        assert f.weight > 0
+
+
+def test_simlingo_partition_weights_sum_to_one():
+    from sub1b_vla.data.carla_buckets import SIMLINGO_TRAIN_PARTITIONS
+
+    assert sum(SIMLINGO_TRAIN_PARTITIONS.values()) == pytest.approx(1.0)
+
+
+def test_bucket_classifier_separates_hard_braking_from_cruising():
+    from sub1b_vla.data.carla_buckets import classify, frame_weight, is_long_tail
+
+    n, dt = 11, 0.2
+    v, x, pts = 12.0, 0.0, []
+    for _ in range(n):
+        v = max(0.0, v - 6.0 * dt)
+        x += v * dt
+        pts.append((x, 0.0))
+    hard = classify(np.array(pts), 12.0, dt, leading_object="walker", vehicle_front=True)
+    cruise = classify(np.stack([np.cumsum(np.full(n, 6 * dt)), np.zeros(n)], 1), 6.0, dt)
+
+    assert "acceleration_negative_5" in hard and "leading_object_walker" in hard
+    assert is_long_tail(hard) and not is_long_tail(cruise)
+    assert frame_weight(hard) > frame_weight(cruise)
 
 
 def test_intent_logits_do_not_depend_on_target_text(model, cfg):
@@ -672,7 +715,7 @@ def test_unsafe_instruction_is_refused_and_trajectory_stays_safe():
     rng = np.random.default_rng(0)
     refused = 0
     for _ in range(300):
-        s = sample_instruction(rng, "red_light", "stop")
+        s = sample_instruction(rng, "OppositeVehicleRunningRedLight", "stop")
         assert s.executed_intent == "stop", "red light must always execute the safe intent"
         if s.refused:
             refused += 1
@@ -687,8 +730,8 @@ def test_compliant_instruction_is_executed():
     rng = np.random.default_rng(4)
     seen = 0
     for _ in range(200):
-        s = sample_instruction(rng, "free_flow", "keep_speed")
-        assert not s.refused, "free_flow has no hazard to refuse for"
+        s = sample_instruction(rng, "noScenarios", "keep_speed")
+        assert not s.refused, "noScenarios has no hazard to refuse for"
         assert s.executed_intent == s.requested_intent
         seen += 1
     assert seen == 200
@@ -701,7 +744,7 @@ def test_instruction_rationale_parses_to_the_executed_intent():
 
     rng = np.random.default_rng(11)
     for _ in range(200):
-        s = sample_instruction(rng, "pedestrian_crossing", "stop")
+        s = sample_instruction(rng, "DynamicObjectCrossing", "stop")
         name, _ = parse_intent(s.rationale())
         assert name == s.executed_intent
 
@@ -745,3 +788,20 @@ def test_dreamer_samples_supervise_the_diffusion_head_but_qa_does_not():
         expected = 1.0 if st in ("driving", "dreamer") else 0.0
         assert float(item["has_waypoints"]) == expected, st
     assert all(v > 0 for v in seen.values()), seen
+
+
+def test_route_command_never_overrides_a_hazard_intent():
+    """A CHANGELANE route command must not turn a red-light stop into a lane
+    change. Route intent is subordinate to safety, in the data as in the model."""
+    from sub1b_vla.data.carla_surrogate import SCENARIO_SEMANTICS, generate_frame
+
+    hazard_scenarios = {k for k, v in SCENARIO_SEMANTICS.items() if v[3] is not None}
+    rng = np.random.default_rng(5)
+    checked = 0
+    for _ in range(600):
+        f = generate_frame(rng)
+        if f.scenario in hazard_scenarios:
+            checked += 1
+            assert f.intent == SCENARIO_SEMANTICS[f.scenario][0], (
+                f"{f.scenario} intent became {f.intent}")
+    assert checked > 0

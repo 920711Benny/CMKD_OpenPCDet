@@ -41,7 +41,7 @@ consistency: {}
 
 data:
   root: ./data
-  train_partitions: {driving: 0.45, drivecot: 0.3, dreamer: 0.25}
+  train_partitions: {driving: 0.25, drivecot: 0.60, dreamer: 0.15}
   drivecot_weight: 0.4
   use_safety_flag: true
   easy_hard_split_2to8: true
@@ -50,8 +50,8 @@ data:
   cut_bottom_quarter: true
   route_as: target_point_command
   max_text_len: 24
-  synthetic: true
-  synthetic_size: 256
+  carla_surrogate: true
+  surrogate_size: 256
 
 train:
   precision: fp32
@@ -60,7 +60,8 @@ train:
   batch_size: 4
   accumulate_grad_batches: 1
   num_workers: 0
-  max_steps: 40
+  max_epochs: 15
+  max_steps: 0
   lr: 1.0e-3
   min_lr: 1.0e-5
   weight_decay: 0.0
