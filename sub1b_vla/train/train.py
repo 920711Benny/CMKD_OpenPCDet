@@ -32,9 +32,31 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
-def build_scheduler(opt, cfg):
+def resolve_schedule(cfg, steps_per_epoch: int) -> tuple[int, int]:
+    """(total optimizer steps, warmup steps).
+
+    Epoch-driven by default, as SimLingo is (`max_epochs: 15`); `max_steps`
+    caps a run when a fixed budget is wanted. Warmup follows SimLingo's
+    `pct_start` fraction unless an explicit `warmup_steps` is given.
+    """
     t = cfg["train"]
-    warmup, total = t["warmup_steps"], t["max_steps"]
+    max_epochs = int(t.get("max_epochs", 0) or 0)
+    max_steps = int(t.get("max_steps", 0) or 0)
+    by_epoch = steps_per_epoch * max_epochs if max_epochs else 0
+    if by_epoch and max_steps:
+        total = min(by_epoch, max_steps)
+    else:
+        total = by_epoch or max_steps
+    if total <= 0:
+        raise ValueError("Set train.max_epochs or train.max_steps to a positive value.")
+    warmup = int(t.get("warmup_steps", 0) or 0)
+    if warmup <= 0:
+        warmup = max(1, int(float(t.get("pct_start", 0.05)) * total))
+    return total, warmup
+
+
+def build_scheduler(opt, cfg, total: int, warmup: int):
+    t = cfg["train"]
     lr, min_lr = t["lr"], t["min_lr"]
 
     def fn(step):
@@ -133,12 +155,18 @@ def train(cfg, config_path: str):
     )
 
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=t["lr"], weight_decay=t["weight_decay"], betas=(0.9, 0.95))
-    sched = build_scheduler(opt, cfg)
+    betas = tuple(t.get("betas", (0.9, 0.999)))
+    opt = torch.optim.AdamW(params, lr=t["lr"], weight_decay=t["weight_decay"], betas=betas)
     use_amp, amp_dtype = resolve_amp(t.get("precision", "bf16-mixed"), device)
 
     accum = t.get("accumulate_grad_batches", 1)
-    max_steps = t["max_steps"]
+    steps_per_epoch = max(1, len(loader))
+    max_steps, warmup = resolve_schedule(cfg, steps_per_epoch)
+    sched = build_scheduler(opt, cfg, max_steps, warmup)
+    epochs = max(1, math.ceil(max_steps / steps_per_epoch))
+    print(f"[schedule] {steps_per_epoch} micro-steps/epoch x {epochs} epochs "
+          f"= {max_steps} steps (warmup {warmup}); effective batch "
+          f"{t['batch_size'] * accum}", flush=True)
     # One log per run: appending successive runs into a single file silently
     # interleaves their step counters and makes the curves unreadable.
     run_stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -150,7 +178,9 @@ def train(cfg, config_path: str):
     model.train()
     opt.zero_grad(set_to_none=True)
 
-    while step < max_steps:
+    for epoch in range(epochs):
+        if step >= max_steps:
+            break
         for batch in loader:
             if step >= max_steps:
                 break

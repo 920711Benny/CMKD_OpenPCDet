@@ -602,3 +602,62 @@ def test_invalid_prediction_type_is_rejected():
     with pytest.raises(ValueError, match="prediction_type"):
         CoCDiffusionHead(spatial_dim=8, sem_dim=8, dim=16, depth=1, heads=2,
                          prediction_type="x0")
+
+
+# --------------------------------------------------- shift augmentation
+def test_shift_augmentation_rotates_waypoints_with_the_image():
+    """A pixel shift without the matching waypoint rotation would teach the
+    model to steer into the shift. Rotation is isometric, so ranges survive."""
+    from sub1b_vla.data.augment import ShiftAugmentation
+
+    aug = ShiftAugmentation(enabled=True, prob=1.0, max_yaw_deg=6.0, seed=3)
+    img = np.random.rand(120, 400, 3).astype(np.float32)
+    wp = np.stack([np.linspace(2, 22, 11), np.zeros(11)], 1).astype(np.float32)
+    out_img, out_wp = aug(img, wp, focal_px=200.0)
+
+    assert not np.array_equal(img, out_img), "image was not shifted"
+    assert abs(out_wp[-1, 1]) > 0.1, "waypoints were not rotated to match"
+    assert np.allclose(np.linalg.norm(out_wp, axis=1), np.linalg.norm(wp, axis=1), atol=1e-3), \
+        "rotation must preserve range"
+
+
+def test_shift_augmentation_is_a_noop_when_disabled_or_unlucky():
+    from sub1b_vla.data.augment import ShiftAugmentation
+
+    img = np.random.rand(40, 80, 3).astype(np.float32)
+    wp = np.ones((11, 2), np.float32)
+    for aug in (ShiftAugmentation(enabled=False, prob=1.0),
+                ShiftAugmentation(enabled=True, prob=0.0)):
+        i2, w2 = aug(img, wp, 100.0)
+        assert np.array_equal(img, i2) and np.array_equal(wp, w2)
+
+
+def test_val_split_never_shifts(cfg):
+    from sub1b_vla.data.dataset import DrivingVLADataset
+
+    assert not DrivingVLADataset(cfg, "val").shift_aug.enabled
+
+
+# ------------------------------------------------------------ schedule
+def test_schedule_is_epoch_driven_like_simlingo():
+    from sub1b_vla.train.train import resolve_schedule
+
+    total, warmup = resolve_schedule(
+        {"train": {"max_epochs": 15, "max_steps": 0, "pct_start": 0.05, "warmup_steps": 0}}, 1000)
+    assert total == 15000
+    assert warmup == 750, "warmup must follow pct_start"
+
+
+def test_max_steps_caps_an_epoch_schedule():
+    from sub1b_vla.train.train import resolve_schedule
+
+    total, _ = resolve_schedule(
+        {"train": {"max_epochs": 15, "max_steps": 400, "pct_start": 0.05, "warmup_steps": 0}}, 100)
+    assert total == 400
+
+
+def test_schedule_rejects_an_empty_budget():
+    from sub1b_vla.train.train import resolve_schedule
+
+    with pytest.raises(ValueError, match="max_epochs or train.max_steps"):
+        resolve_schedule({"train": {"max_epochs": 0, "max_steps": 0}}, 100)

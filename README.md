@@ -16,6 +16,75 @@ actuation.
 
 ---
 
+## 0. Training cost — read this before any number in this repo
+
+**The runs executed inside the build container are smoke tests, not training.**
+They took ~20–80 minutes because they are a 7.1M-parameter *stub* model on
+procedurally generated toy data, on 4 CPU cores. They prove the code runs. They
+prove nothing about driving.
+
+Real training is expensive, and SimLingo's own recipe says so. Quoted from
+`RenzKa/simlingo@main` (`train_simlingo_seed1.sh`, `simlingo_seed1.yaml`), and
+mirrored in `baselines/simlingo_training_recipe.json`:
+
+| | SimLingo | this repo, `default.yaml` | this repo, `single_gpu_reduced.yaml` |
+|---|---|---|---|
+| GPUs | **8** | 1 | 1 |
+| wall clock | **3-day SLURM limit** (≤576 GPU-h) | ~11 days projected | ~10 h projected |
+| epochs | 15 | 15 | 4 |
+| effective batch | 48 (6 × 8 GPUs) | 48 (6 × accum 8) | 48 (12 × accum 4) |
+| lr / weight decay | 3e-5 / 0.1 | 3e-5 / 0.1 | 1e-4 / 0.1 |
+| strategy | deepspeed_stage_2 | single device | single device |
+| dataset | full HF release (driving + VQA + commentary + dreamer) | same | subsampled, `data.max_records` |
+
+The projections are not guesses — `tools/compute_budget.py` measures a real
+forward+backward at your configured batch size and extrapolates. It refuses to
+invent a throughput for hardware it has not seen; supply one with
+`--samples-per-s` if you measured it elsewhere.
+
+```bash
+python -m sub1b_vla.tools.compute_budget --config sub1b_vla/configs/default.yaml \
+    --dataset-frames <frames in your extracted copy>
+```
+
+The 3-day figure is SimLingo's SLURM *limit*, not a measured runtime, so ≤576
+GPU-hours is an upper bound. Either way: a single-GPU reproduction of the full
+recipe is a multi-day job, and `single_gpu_reduced.yaml` exists so you can get a
+first real checkpoint overnight — with every deviation from the matched recipe
+listed in its header, because results under it are **not** comparable to a
+full-recipe run.
+
+### What is matched to SimLingo, and what deliberately differs
+
+Matched, so the comparison is not confounded by tuning: `lr` 3e-5,
+`weight_decay` 0.1, `betas` (0.9, 0.999), `pct_start` 0.05, `max_epochs` 15,
+effective batch 48, `num_workers` 8, LoRA r=32 / α=64 / dropout 0.1,
+`pred_len` 11, `hist_len` 1, `cut_bottom_quarter`, `route_as:
+target_point_command`, `use_safety_flag`, `img_augmentation(_prob 0.5)`,
+`img_shift_augmentation(_prob 0.5)`, `skip_first_n_frames` 10,
+`num_route_points` 20.
+
+Deliberately different — these are the contribution, or are forced by the
+hardware target:
+
+| | SimLingo | here | why |
+|---|---|---|---|
+| vision | InternVL2-1B's InternViT, **trainable** | DINOv2-small + SigLIP-base, **frozen** | the dual-head asymmetric split; frozen keeps trainables at 23M |
+| action head | direct waypoint regression | CoC conditional diffusion (v-pred, 10-step DDIM) | multimodal trajectories; the thesis contribution |
+| language↔action link | language-action alignment via shared training | explicit differentiable Causal Consistency Loss | makes agreement an optimised quantity, not a hoped-for side effect |
+| precision | 16-mixed | bf16-mixed | Blackwell; no loss scaler needed |
+| parallelism | deepspeed_stage_2, 8 GPUs | single device + grad accumulation | single-workstation constraint |
+| total params | ~0.94B (InternVL2-1B) | **0.632B** | the <1B budget |
+
+`img_shift_augmentation` is an approximation here and is marked as such in the
+code: SimLingo re-renders genuinely shifted camera views during data collection,
+which we do not have. We reproduce only the *rotational* part — a horizontal
+pixel shift of `du` is a camera yaw of `atan(du/f)`, and the waypoints are
+rotated to match. Translation is not faked, because a 2-D shift cannot reproduce
+parallax and pretending otherwise would teach a geometry that does not exist.
+
+---
+
 ## 1. Architecture
 
 ```
@@ -211,24 +280,36 @@ The report never defaults, estimates, or carries a value over from another run.
 Built and validated in a CPU-only container with **no GPU, no CARLA, and the
 HuggingFace hub blocked by the network proxy**. Being precise about which is which:
 
-**Measured here (real numbers):**
-* Parameter budget — 0.630 B, from architecture-exact replicas whose counts were
-  cross-checked against independent analytic formulas (the tool raises if they
-  disagree) and which match the published sizes of all three backbones.
-* 52 unit tests, covering frame/sign conventions, loss semantics, DDIM
-  determinism, waypoint normalisation, and the async runtime's non-blocking
-  contract.
+**Measured here (real numbers, on the CPU smoke model — see §0):**
+* Parameter budget — **0.632 B** total, 23.0 M trainable, from architecture-exact
+  replicas whose counts were cross-checked against independent analytic formulas
+  (the tool raises if they disagree) and which match the published sizes of all
+  three backbones.
+* **58 unit tests**, covering frame/sign conventions, loss semantics, DDIM
+  determinism, waypoint normalisation, shift-augmentation label correctness, the
+  epoch/warmup schedule, and the async runtime's non-blocking contract.
 * The v-vs-ε comparison table above, from a controlled overfit.
-* Full training loop convergence on the procedural sanity dataset.
-* Camera projection, controller sign conventions, HUD compositing.
+* Atomic gates on the smoke checkpoint — **2 of 3 pass**:
+
+  | gate | result |
+  |---|---|
+  | steering distribution | **PASS** — separation +0.270 (≥0.25), polarity 1.00 |
+  | 10-step diffusion latency & stability | **PASS** — p95 27.9 ms / 40.4 Hz on CPU (budget 80 ms), sample spread 0.262 m |
+  | red-light stop adherence | **FAIL** — final speed 1.92 m/s (need ≤0.5); red *is* separated from green (1.92 vs 5.77) but does not reach rest |
+
+  The failing gate is doing its job: a stub-backbone model trained for 80 CPU-minutes
+  on toy data has not learned to stop. It is reported as FAIL, not tuned into a pass.
+* Action-CoT alignment 0.536 over 192 samples (same caveat — it measures the
+  smoke model, and is strongest where the synthetic cue is most explicit:
+  left_turn 0.91, green_light 0.83).
 
 **Not executed here, and therefore reported as `--`:**
 * Driving Score / Route Completion / Infraction Score / per-km infraction rates —
   these require a CARLA closed-loop run. The harness computes them from a real
   `results.json`; it will not synthesise them.
-* Training on real driving data, and latency on an RTX PRO 6000. CPU latency
-  numbers from this container are reported as CPU numbers and are not a proxy for
-  the GPU budget.
+* Training on real driving data (see §0 for what that actually costs), and
+  latency on an RTX PRO 6000. CPU latency is reported as CPU latency, with the
+  device recorded in the latency JSON and surfaced in the report's provenance.
 
 Because the hub is unreachable here, the backbones fall back to randomly
 initialised stubs that **announce themselves loudly** (`[STUB BACKBONE]`,
@@ -248,5 +329,8 @@ sub1b_vla/
   carla_agent/ sensors, controller, async_pipeline, hud, agent
   bench/      metrics, report, alignment_eval, run_benchmark
   tools/      param_budget.py                the <1B gate
+              compute_budget.py              measured training-time projection
+              waypoint_stats.py              diffusion normalisation constants
+              demo_hud.py                    offline HUD / async-runtime exercise
   tests/      test_core.py
 ```

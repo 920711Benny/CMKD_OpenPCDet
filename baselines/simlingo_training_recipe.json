@@ -1,0 +1,58 @@
+{
+  "_provenance": "Read from github.com/RenzKa/simlingo @ main on 2026-08-29. Values below are quoted from that repository, not from memory.",
+  "_sources": {
+    "train_simlingo_seed1.sh": "SLURM header + launch command",
+    "simlingo_training/config/experiment/simlingo_seed1.yaml": "experiment overrides",
+    "simlingo_training/config.py": "TrainConfig / DrivingModelConfig / DatasetBaseConfig defaults"
+  },
+  "hardware": {
+    "gpus": 8,
+    "cpus_per_task": 64,
+    "slurm_time_limit": "3-00:00",
+    "gpu_hours_upper_bound": 576,
+    "note": "3 days is the SLURM wall-clock LIMIT, not a measured runtime. Actual training may finish sooner; treat 576 GPU-hours as an upper bound."
+  },
+  "optimisation": {
+    "lr": 3e-05,
+    "weight_decay": 0.1,
+    "betas": [0.9, 0.999],
+    "pct_start": 0.05,
+    "max_epochs": 15,
+    "val_every_n_epochs": 2,
+    "precision": "16-mixed",
+    "strategy": "deepspeed_stage_2",
+    "batch_size_per_gpu": 6,
+    "effective_batch": 48,
+    "num_workers": 8
+  },
+  "model": {
+    "vision_variant": "OpenGVLab/InternVL2-1B",
+    "language_variant": "OpenGVLab/InternVL2-1B",
+    "vision_freeze": false,
+    "lora": true,
+    "lora_r": 32,
+    "lora_alpha": 64,
+    "lora_dropout": 0.1,
+    "predict_route_as_wps": true,
+    "speed_wps_mode": "2d"
+  },
+  "data": {
+    "pred_len": 11,
+    "hist_len": 1,
+    "cut_bottom_quarter": true,
+    "route_as": "target_point_command",
+    "use_safety_flag": true,
+    "use_commentary": true,
+    "use_qa": true,
+    "qa_augmentation": true,
+    "img_augmentation": true,
+    "img_augmentation_prob": 0.5,
+    "img_shift_augmentation": true,
+    "img_shift_augmentation_prob": 0.5,
+    "skip_first_n_frames": 10,
+    "num_route_points": 20,
+    "datasets": ["Data_Driving", "Data_Dreamer", "Data_Eval (QA/commentary)"],
+    "source": "https://huggingface.co/datasets/RenzKa/simlingo",
+    "size_note": "Distributed as many .tar.gz shards over Git LFS; driving frames plus VQA, commentary and dreamer labels. Set dataset_frames from your own extracted copy -- this file does not assert a byte count it did not measure."
+  }
+}

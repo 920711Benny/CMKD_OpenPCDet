@@ -1,5 +1,28 @@
-# Sub-1B Dual-Head Diffusion VLA -- single RTX PRO 6000 training config.
-experiment: dualhead_coc_diffusion_vla
+# Single-GPU reduced recipe.
+#
+# sub1b_vla/configs/default.yaml mirrors SimLingo's published training recipe
+# (15 epochs, effective batch 48, lr 3e-5) which SimLingo runs on EIGHT GPUs
+# under a 3-day SLURM limit. Projected onto one RTX PRO 6000 that is roughly
+# 11 days of wall clock -- run
+#   python -m sub1b_vla.tools.compute_budget --config <cfg> --dataset-frames N
+# to get the number for your own dataset and measured throughput.
+#
+# This config trades scope for a run that finishes in a day or two. Every
+# deviation from the SimLingo-matched recipe is listed here, because a result
+# obtained under these settings is NOT comparable to a full-recipe run and the
+# difference must be reported alongside any benchmark table:
+#
+#   1. max_epochs 15 -> 4            fewer passes over the data
+#   2. dataset subsampled            see data.max_records / bucket weighting
+#   3. image_size 224 kept           (unchanged; do not shrink without saying so)
+#   4. vision backbones frozen       (already true in the default recipe; SimLingo
+#                                     trains its vision encoder, freeze: False)
+#   5. lr raised 3e-5 -> 1e-4        compensates for the shorter schedule
+#
+# Deviation 4 is the one that makes this tractable at all: with both backbones
+# frozen only ~21M parameters take gradients, so the backward pass is a fraction
+# of SimLingo's. It is also a genuine capability difference, not just a saving.
+experiment: dualhead_single_gpu_reduced
 seed: 1337
 param_limit: 1000000000          # hard gate, enforced at model construction
 
@@ -75,6 +98,7 @@ data:
   use_qa: true
   qa_augmentation: true
   max_text_len: 96
+  max_records: 400000             # subsample the manifest (0 = use all)
   synthetic: false                # true => procedural data, no disk required
   synthetic_size: 512
 
@@ -90,14 +114,14 @@ train:
   precision: bf16-mixed
   strategy: auto
   devices: 1
-  batch_size: 6                   # per-step micro-batch (SimLingo: 6 per GPU)
-  accumulate_grad_batches: 8      # -> effective batch 48, == SimLingo's 6 x 8
+  batch_size: 12                  # larger micro-batch: frozen backbones free memory
+  accumulate_grad_batches: 4      # -> effective batch 48, still == SimLingo's
   num_workers: 8
   # Epoch-based like SimLingo (max_epochs: 15). max_steps caps a run when you
   # want a fixed budget; set it to 0 to run purely by epochs.
-  max_epochs: 15
+  max_epochs: 4
   max_steps: 0
-  lr: 3.0e-5
+  lr: 1.0e-4
   min_lr: 1.0e-7
   weight_decay: 0.1
   betas: [0.9, 0.999]
