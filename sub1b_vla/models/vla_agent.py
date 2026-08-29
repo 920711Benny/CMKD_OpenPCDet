@@ -112,9 +112,10 @@ class DualHeadDiffusionVLA(nn.Module):
             tr = sum(p.numel() for p in mod.parameters() if p.requires_grad)
             return t, tr
 
+        frz = " (frozen)" if self.encoder.frozen else " (trained)"
         comps = {
-            "encoder.spatial (frozen)": count(self.encoder.spatial_backbone),
-            "encoder.semantic (frozen)": count(self.encoder.semantic_backbone),
+            f"encoder.spatial{frz}": count(self.encoder.spatial_backbone),
+            f"encoder.semantic{frz}": count(self.encoder.semantic_backbone),
             "encoder.projectors": (
                 count(self.encoder.spatial_proj)[0] + count(self.encoder.semantic_compress)[0]
                 + count(self.encoder.geo_to_sem)[0] + count(self.encoder.geo_kv)[0],

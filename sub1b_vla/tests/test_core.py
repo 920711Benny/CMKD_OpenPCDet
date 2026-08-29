@@ -1006,3 +1006,53 @@ def test_terminal_speed_differs_from_robust_final_speed_on_a_stop():
     dyn = compute_dynamics(torch.tensor(_stopping_traj(12.5))[None], dt=0.2)
     assert float(dyn.terminal_speed) == pytest.approx(0.0, abs=1e-3)
     assert float(dyn.final_speed) > 0.5, "the robust mean should still be non-zero"
+
+
+# ------------------------------------------------------- encoder freezing
+def test_frozen_encoder_blocks_gradients_and_stays_in_eval(cfg):
+    from sub1b_vla.models.dual_head_encoder import DualHeadAsymmetricEncoder
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        enc = DualHeadAsymmetricEncoder(
+            spatial_model="__stub_a__", semantic_model="__stub_b__",
+            embed_dim=64, spatial_dim=32, num_semantic_tokens=4,
+            image_size=64, freeze=True)
+    enc.train()
+    assert not enc.spatial_backbone.training, "a frozen backbone must stay in eval"
+    out = enc(torch.randn(2, 3, 64, 64))
+    out.spatial_tokens.sum().backward()
+    assert all(p.grad is None for p in enc.spatial_backbone.parameters())
+
+
+def test_unfrozen_encoder_receives_gradients(cfg):
+    """`freeze: false` is what the offline stub path needs: freezing randomly
+    initialised weights leaves most of the model contributing nothing."""
+    from sub1b_vla.models.dual_head_encoder import DualHeadAsymmetricEncoder
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        enc = DualHeadAsymmetricEncoder(
+            spatial_model="__stub_a__", semantic_model="__stub_b__",
+            embed_dim=64, spatial_dim=32, num_semantic_tokens=4,
+            image_size=64, freeze=False)
+    enc.train()
+    assert enc.spatial_backbone.training
+    out = enc(torch.randn(2, 3, 64, 64))
+    (out.spatial_tokens.sum() + out.semantic_tokens.sum()).backward()
+    for mod in (enc.spatial_backbone, enc.semantic_backbone):
+        grads = [p.grad for p in mod.parameters() if p.grad is not None]
+        assert grads, "unfrozen backbone received no gradients"
+        assert sum(float(g.abs().sum()) for g in grads) > 0
+
+
+def test_param_report_labels_match_the_freeze_setting():
+    from sub1b_vla.models.vla_agent import DualHeadDiffusionVLA
+
+    base = load_config(CFG)
+    for freeze, label in ((True, "(frozen)"), (False, "(trained)")):
+        base["model"]["freeze"] = freeze
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rep = DualHeadDiffusionVLA(base).parameter_report()
+        assert any(label in k for k in rep.by_component), (freeze, list(rep.by_component))
