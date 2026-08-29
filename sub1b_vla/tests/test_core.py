@@ -1388,3 +1388,151 @@ def test_tuned_config_preserves_every_hydra_key_of_the_original():
     for key, val in a.items():
         if key.endswith("_target_"):
             assert b.get(key) == val, f"_target_ changed: {key}"
+
+
+# ------------------------------------------------- CarlaVLA CoT primitives
+def test_primitive_counts_match_the_validation_report():
+    """Counts are quoted from cot_dataset_v3_calibrated_validation_report.json;
+    pinned so the class weights derived from them cannot drift."""
+    from sub1b_vla.models.carlavla_primitives import (
+        LAT_COUNTS, LAT_PRIMITIVES, LON_COUNTS, LON_PRIMITIVES,
+    )
+
+    assert sum(LON_COUNTS.values()) == sum(LAT_COUNTS.values()) == 634_293
+    assert set(LON_COUNTS) == set(LON_PRIMITIVES)
+    assert set(LAT_COUNTS) == set(LAT_PRIMITIVES)
+
+
+def test_class_weights_favour_the_rare_primitives_without_exploding():
+    """`go straight` is 78% of lateral and `turn left` 2.0%. Plain inverse
+    frequency would weight one 45x the other and make the loss hostage to a
+    couple of samples per batch."""
+    from sub1b_vla.models.carlavla_primitives import (
+        LAT_COUNTS, LAT_PRIMITIVES, class_weights,
+    )
+
+    w = dict(zip(LAT_PRIMITIVES, class_weights(LAT_COUNTS, LAT_PRIMITIVES)))
+    assert w["turn left"] > w["go straight"]
+    assert max(w.values()) / min(w.values()) < 10, w
+    assert abs(sum(w.values()) / len(w) - 1.0) < 1e-6, "weights must average 1.0"
+
+
+def test_single_intent_collapse_keeps_stop_above_a_turn():
+    """You cannot turn while stopped, so a full stop outranks the lateral
+    primitive when the two disagree."""
+    from sub1b_vla.models.carlavla_primitives import to_single_intent
+
+    assert to_single_intent("remain stopped", "turn left") == "stop"
+    assert to_single_intent("brake", "turn left") == "turn_left"
+    assert to_single_intent("accelerate", "go straight") == "accelerate"
+    assert to_single_intent("maintain speed", "change lane to the right") == "lane_change_right"
+
+
+def test_primitive_normalisation_tolerates_drift_and_falls_back_neutrally():
+    from sub1b_vla.models.carlavla_primitives import normalise
+
+    assert normalise("Turn_Left", "lat") == "turn left"
+    assert normalise("  MAINTAIN   SPEED ", "lon") == "maintain speed"
+    # An unparseable label must not become a decisive one.
+    assert normalise("garbage", "lon") == "maintain speed"
+    assert normalise("garbage", "lat") == "go straight"
+
+
+# ------------------------------------------------- CarlaVLA CoT conversion
+def _cot_fixture(tmp_path, n_routes=3, n_frames=8):
+    from PIL import Image
+
+    recs = []
+    for r in range(n_routes):
+        ep = f"data/simlingo/lb1_split/routes_training/ControlLoss/Town01_Rep0_route{r}"
+        (tmp_path / ep / "rgb").mkdir(parents=True, exist_ok=True)
+        for i in range(n_frames):
+            Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(
+                tmp_path / ep / "rgb" / f"{i:04d}.jpg", "JPEG")
+            recs.append({
+                "frame_id": f"{i:04d}", "episode_id": ep,
+                "text": "TASK: t. CRITICAL: c. RULE: r. INTENT: brake, turn left.",
+                "fields": {"task": "t", "critical": "c", "rule": "r",
+                           "intent": "brake, turn left", "counterfactual": "cf"},
+                "counterfactual_raw": {"counterfactual_collision": False,
+                                       "factual_collision": True, "factual_min_gap": 3.0},
+                "counterfactual_lat_raw": ({"counterfactual_collision": True}
+                                           if i == 0 else None),
+                "meta": {"command": 4, "speed": 5.0,
+                         "lon_primitive": "brake", "lat_primitive": "turn left"},
+            })
+    (tmp_path / "cot.json").write_text(json.dumps(recs))
+    return recs
+
+
+def test_cot_conversion_splits_by_route_never_by_frame(tmp_path):
+    """Adjacent frames of one route are near-duplicates. A frame-level split
+    leaks validation into training and makes every metric optimistic."""
+    import subprocess
+    import sys
+
+    _cot_fixture(tmp_path)
+    r = subprocess.run(
+        [sys.executable, "-W", "ignore", "-m", "sub1b_vla.tools.convert_carlavla_cot",
+         "--cot-json", str(tmp_path / "cot.json"), "--data-root", str(tmp_path),
+         "--out", str(tmp_path), "--val-frac", "0.34"],
+        capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr[-2000:]
+
+    train = [json.loads(l) for l in (tmp_path / "cot_train.jsonl").read_text().splitlines()]
+    val = [json.loads(l) for l in (tmp_path / "cot_val.jsonl").read_text().splitlines()]
+    assert train and val
+    assert not (set(r["episode_id"] for r in train)
+                & set(r["episode_id"] for r in val)), "a route appeared in both splits"
+
+
+def test_cot_conversion_preserves_the_factored_label_and_collision_signal(tmp_path):
+    import subprocess
+    import sys
+
+    _cot_fixture(tmp_path)
+    subprocess.run(
+        [sys.executable, "-W", "ignore", "-m", "sub1b_vla.tools.convert_carlavla_cot",
+         "--cot-json", str(tmp_path / "cot.json"), "--data-root", str(tmp_path),
+         "--out", str(tmp_path), "--val-frac", "0.34"],
+        capture_output=True, text=True, check=True)
+    recs = [json.loads(l) for l in (tmp_path / "cot_train.jsonl").read_text().splitlines()]
+
+    for rec in recs:
+        assert rec["lon_primitive"] == "brake"
+        assert rec["lat_primitive"] == "turn left"
+        assert rec["sample_type"] == "drivecot"
+        assert rec["cot_text"].startswith("TASK:")
+    # The lateral counterfactual takes priority over the longitudinal one.
+    frame0 = [r for r in recs if r["image"].endswith("0000.jpg")]
+    assert frame0 and all(r["collision_label"] == 1.0 for r in frame0), \
+        "lateral counterfactual_collision=True must win over the longitudinal False"
+    others = [r for r in recs if not r["image"].endswith("0000.jpg")]
+    assert others and all(r["collision_label"] == 0.0 for r in others)
+
+
+def test_collision_label_is_none_without_any_counterfactual():
+    """None means unusable, and must be masked out of the loss rather than
+    treated as a negative."""
+    from sub1b_vla.tools.convert_carlavla_cot import collision_label
+
+    assert collision_label({"counterfactual_raw": None,
+                            "counterfactual_lat_raw": None}) is None
+    assert collision_label({"counterfactual_raw": {"counterfactual_collision": True}}) == 1.0
+
+
+def test_near_miss_frames_count_as_hard_or_rare():
+    from sub1b_vla.tools.convert_carlavla_cot import is_hard_or_rare
+
+    scraped_through = {"episode_id": "routes_training/noScenarios/x",
+                       "counterfactual_raw": {"factual_collision": False,
+                                              "factual_min_gap": 3.0,
+                                              "counterfactual_collision": False}}
+    comfortable = {"episode_id": "routes_training/noScenarios/x",
+                   "counterfactual_raw": {"factual_collision": False,
+                                          "factual_min_gap": 25.0,
+                                          "counterfactual_collision": False}}
+    rare_scenario = {"episode_id": "routes_training/DynamicObjectCrossing/x"}
+    assert is_hard_or_rare(scraped_through)
+    assert not is_hard_or_rare(comfortable)
+    assert is_hard_or_rare(rare_scenario)

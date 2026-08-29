@@ -7,6 +7,7 @@
 #   ./run_pipeline.sh test              unit tests
 #   ./run_pipeline.sh prepare <dataset> CARLA logs -> training manifests
 #   ./run_pipeline.sh gen-cot <dataset> [mult]  expand the CoT pool from CARLA state
+#   ./run_pipeline.sh import-cot <cot.json> [root]  import the CarlaVLA CoT dataset
 #   ./run_pipeline.sh train             single-GPU training
 #   ./run_pipeline.sh verify <ckpt>     atomic gates (terminal gate)
 #   ./run_pipeline.sh align <ckpt>      Action-CoT alignment score
@@ -36,6 +37,9 @@ case "$cmd" in
   gen-cot)
     python3 -m sub1b_vla.data.generate_cot --root "$1" \
       --out "$1/cot_generated.jsonl" --multiplier "${2:-2}" ;;
+  import-cot)
+    python3 -m sub1b_vla.tools.convert_carlavla_cot \
+      --cot-json "$1" --data-root "${2:-database}" --out "${2:-database}" ;;
   train)   python3 -m sub1b_vla.train.train --config "$CONFIG" "$@" ;;
   verify)
     python3 -m sub1b_vla.verify.atomic_checks --config "$CONFIG" \
