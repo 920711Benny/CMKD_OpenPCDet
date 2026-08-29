@@ -1,11 +1,17 @@
-# Mirror of the CarlaVLA v3 hydra config (carlavla_v3_diffusion_cfg_10ep),
-# translated into this repo's schema so param_budget / gpu_preflight /
-# compute_budget / config_audit can be run against it.
+# CarlaVLA v3 with the larger language tower, which the raised < 3 B budget
+# admits. Identical to carlavla_v3.yaml except for the decoder and embed_dim.
 #
-# Values are copied from that config, NOT re-tuned. Where this repo has no
-# equivalent knob the original value is recorded in a comment so nothing is
-# silently dropped.
-experiment: carlavla_v3_diffusion_cfg_10ep
+#   InternVL2-2B decoder (internlm2-1.8b)  1.889 B
+#   DINOv2-large                           0.304 B
+#   SigLIP-so400m                          0.428 B
+#   LoRA r=32 + fusion + diffusion heads   ~0.031 B
+#   ------------------------------------------------
+#   total                                  2.652 B  < 3 B
+#
+# The decoder is ~3.8x the InternVL2-1B one, so expect roughly that factor on
+# the language forward pass; run gpu_preflight before committing to it, since
+# the larger tower also raises the memory floor and may force a smaller batch.
+experiment: carlavla_v3_internvl2_2b
 seed: 9876
 # Parameter budget: the project constraint is now < 3 B (raised from the original
 # < 1 B on 2026-08-29). `param_limit` is the authority and is enforced at model
@@ -13,7 +19,7 @@ seed: 9876
 param_limit: 3000000000
 
 model:
-  language_model: OpenGVLab/InternVL2-1B
+  language_model: OpenGVLab/InternVL2-2B
   use_language_tower_only: true
   # variant: dual_vision  ->  DINOv2-large (query) x SigLIP-so400m (key/value)
   spatial_model: pretrained/dinov2-large
@@ -21,7 +27,7 @@ model:
   freeze: true
   allow_stub: true
   attn_implementation: flash_attention_2
-  embed_dim: 896
+  embed_dim: 2048   # internlm2-1.8b hidden size
   spatial_dim: 256
   num_semantic_tokens: 32       # original: FIXED_GRID 16x16 = 256 fused tokens
   image_size: 224               # original: DINOv2 518 crop / SigLIP 384

@@ -39,6 +39,14 @@ SIGLIP_SO400M = dict(hidden=1152, layers=27, heads=16, mlp=4304, patch=14,
                      pooling_head=True)
 QWEN2_05B = dict(hidden=896, layers=24, heads=14, kv_heads=2, head_dim=64,
                  intermediate=4864, vocab=151936, tie_embeddings=True)
+# InternVL2-2B's decoder (internlm2-chat-1_8b). Untied embeddings, GQA 16/8.
+INTERNLM2_18B = dict(hidden=2048, layers=24, heads=16, kv_heads=8, head_dim=128,
+                     intermediate=8192, vocab=92553, tie_embeddings=False)
+
+LANGUAGE_SPECS = {
+    "OpenGVLab/InternVL2-1B": QWEN2_05B,
+    "OpenGVLab/InternVL2-2B": INTERNLM2_18B,
+}
 
 VISION_SPECS = {
     "facebook/dinov2-small": DINOV2_SMALL,
@@ -205,9 +213,10 @@ def build_report(cfg: dict) -> dict:
         ReplicaViT, vit_param_count)
     add("semantic backbone", m["semantic_model"], VISION_SPECS[m["semantic_model"]],
         ReplicaViT, vit_param_count)
-    add("language decoder", m["language_model"], QWEN2_05B, ReplicaQwen2, qwen2_param_count)
+    lang_spec = LANGUAGE_SPECS.get(m["language_model"], QWEN2_05B)
+    add("language decoder", m["language_model"], lang_spec, ReplicaQwen2, qwen2_param_count)
 
-    lora = lora_param_count(QWEN2_05B, m.get("lora_r", 16))
+    lora = lora_param_count(lang_spec, m.get("lora_r", 16))
     rows.append(("LoRA adapters", f"r={m.get('lora_r', 16)} on q,k,v,o", lora))
     source["LoRA adapters"] = "analytic"
 
@@ -260,7 +269,8 @@ def _build_trainable_only(cfg: dict) -> dict:
 
 def render(rep: dict) -> str:
     w = 78
-    out = ["=" * w, "PARAMETER BUDGET  --  strict limit < 1.000 B".center(w), "=" * w,
+    out = ["=" * w,
+           f"PARAMETER BUDGET  --  limit < {rep['limit'] / 1e9:.3f} B".center(w), "=" * w,
            f"{'component':<26}{'source / id':<32}{'params':>18}", "-" * w]
     for name, ident, n in rep["rows"]:
         out.append(f"{name:<26}{str(ident)[:31]:<32}{n:>18,}")

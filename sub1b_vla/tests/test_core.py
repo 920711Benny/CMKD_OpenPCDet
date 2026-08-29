@@ -1222,15 +1222,35 @@ def test_flash_attention_runs_under_explicit_opt_in(monkeypatch):
 
 
 # ---------------------------------------------------------- config audit
-def test_carlavla_v3_mirror_is_over_the_parameter_budget():
-    """The shipped CarlaVLA v3 config pairs DINOv2-large with SigLIP-so400m,
-    which together with the InternVL2-1B decoder exceeds the <1B constraint.
-    Pinned so the finding cannot be lost."""
+def test_carlavla_v3_fits_the_3b_limit_but_not_the_original_1b_one():
+    """The budget was raised from <1B to <3B. The config fits the new limit and
+    would not have fit the old one -- both halves pinned so neither the finding
+    nor the relaxation can be lost silently."""
     from sub1b_vla.tools.param_budget import build_report
 
-    rep = build_report(load_config("sub1b_vla/configs/carlavla_v3.yaml"))
-    assert not rep["within_budget"]
-    assert rep["total"] > 1.2e9, rep["total"]
+    cfg = load_config("sub1b_vla/configs/carlavla_v3.yaml")
+    assert cfg["param_limit"] == 3_000_000_000
+    rep = build_report(cfg)
+    assert rep["within_budget"]
+    assert rep["total"] > 1_000_000_000, "would have failed the original <1B limit"
+    assert rep["total"] < 3_000_000_000
+
+
+def test_internvl2_2b_config_fits_with_headroom_to_spare():
+    from sub1b_vla.tools.param_budget import build_report
+
+    rep = build_report(load_config("sub1b_vla/configs/carlavla_v3_2b.yaml"))
+    assert rep["within_budget"], rep["total"]
+    assert 2.5e9 < rep["total"] < 3.0e9, rep["total"]
+
+
+def test_every_config_declares_the_same_budget_limit():
+    """A per-config limit is a gate, not a suggestion; drift between configs
+    would let one build quietly exceed what the others enforce."""
+    import glob
+
+    limits = {p: load_config(p)["param_limit"] for p in glob.glob("sub1b_vla/configs/*.yaml")}
+    assert set(limits.values()) == {3_000_000_000}, limits
 
 
 def test_audit_suggests_only_backbone_pairs_that_actually_fit():
@@ -1238,6 +1258,7 @@ def test_audit_suggests_only_backbone_pairs_that_actually_fit():
     from sub1b_vla.tools.param_budget import build_report
 
     cfg = load_config("sub1b_vla/configs/carlavla_v3.yaml")
+    cfg["param_limit"] = 1_000_000_000        # the tighter historical limit
     rep = build_report(cfg)
     vision = sum(n for name, _, n in rep["rows"] if "backbone" in name)
     pairs = fitting_backbone_pairs(cfg, rep["total"] - vision)
@@ -1251,6 +1272,7 @@ def test_audit_flags_dataloader_starvation_and_batch_mismatch():
 
     findings = audit(load_config("sub1b_vla/configs/carlavla_v3.yaml"))
     titles = " | ".join(f.title for f in findings)
+    assert "Parameter budget: 1.2501 B" in titles, titles
     assert "num_workers=0" in titles
     assert "Effective batch 8" in titles
     assert "16-mixed" in titles

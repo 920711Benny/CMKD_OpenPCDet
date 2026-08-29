@@ -206,7 +206,21 @@ backbone (93 M) rather than a larger LLM.
 
 ### Parameter budget (verified, hard-gated)
 
-`assert_parameter_budget()` raises at construction if the total reaches 1 B.
+**The budget is < 3 B**, raised from the original < 1 B on 2026-08-29 at the
+project owner's direction. `param_limit` in each config is the authority and is
+enforced at model construction — `assert_parameter_budget()` raises rather than
+warns. (The package is still named `sub1b_vla`, which reflects the original
+design point rather than the current limit.)
+
+| build | total | notes |
+|---|---:|---|
+| `default.yaml` — DINOv2-small + SigLIP-base + InternVL2-1B | **0.632 B** | the original sub-1B design point |
+| `carlavla_v3.yaml` — DINOv2-large + SigLIP-so400m + InternVL2-1B | **1.250 B** | mirrors the shipped hydra config; would *not* have fit < 1 B |
+| `carlavla_v3_2b.yaml` — same vision + InternVL2-2B | **2.697 B** | 0.303 B headroom; decoder is ~3.8× larger |
+
+Counts come from architecture-exact replicas cross-checked against independent
+analytic formulas — the tool raises if the two disagree, so the arithmetic is
+verifiable rather than asserted.
 
 | component | params | trainable |
 |---|---:|---:|

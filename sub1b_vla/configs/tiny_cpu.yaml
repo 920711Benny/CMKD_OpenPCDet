@@ -3,7 +3,10 @@
 # backbones fall back to random StubViT/StubCausalLM, so metrics are meaningless.
 experiment: tiny_cpu_smoke
 seed: 0
-param_limit: 1000000000
+# Parameter budget: the project constraint is now < 3 B (raised from the original
+# < 1 B on 2026-08-29). `param_limit` is the authority and is enforced at model
+# construction; the package name still reflects the original design point.
+param_limit: 3000000000
 
 model:
   language_model: __stub__

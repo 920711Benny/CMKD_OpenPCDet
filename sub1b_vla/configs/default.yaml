@@ -1,7 +1,10 @@
 # Sub-1B Dual-Head Diffusion VLA -- single RTX PRO 6000 training config.
 experiment: dualhead_coc_diffusion_vla
 seed: 1337
-param_limit: 1000000000          # hard gate, enforced at model construction
+# Parameter budget: the project constraint is now < 3 B (raised from the original
+# < 1 B on 2026-08-29). `param_limit` is the authority and is enforced at model
+# construction; the package name still reflects the original design point.
+param_limit: 3000000000
 
 model:
   # Language: InternVL2-1B's Qwen2-0.5B decoder ONLY. Its native 0.30B InternViT
