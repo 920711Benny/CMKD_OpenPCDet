@@ -454,3 +454,54 @@ def test_split_batch_preserves_all_samples():
         chunks = _split_batch(batch, parts)
         assert sum(c["a"].shape[0] for c in chunks) == 10
         assert torch.equal(torch.cat([c["a"] for c in chunks]), batch["a"])
+
+
+# ----------------------------------------------------------------- bench
+def test_leaderboard_parser_computes_per_km_rates():
+    from sub1b_vla.bench.metrics import parse_leaderboard_results
+
+    m = parse_leaderboard_results("sub1b_vla/tests/fixtures/leaderboard_results_sample.json")
+    assert m.num_routes == 2
+    assert m.driving_score == pytest.approx((62.5 + 80.0) / 2)
+    assert m.route_completion == pytest.approx(95.0)
+    assert m.driven_km == pytest.approx(5.0)
+    # 2 collisions (1 vehicle + 1 layout) over 5 km
+    assert m.collisions_per_km == pytest.approx(0.4)
+    assert m.red_light_per_km == pytest.approx(0.0)
+    assert m.sidewalk_per_km == pytest.approx(0.2)
+
+
+def test_missing_metrics_render_as_double_dash_not_zero():
+    from sub1b_vla.bench.metrics import BenchmarkMetrics
+    from sub1b_vla.bench.report import render_table
+
+    table = render_table(BenchmarkMetrics(), BenchmarkMetrics())
+    assert "--" in table
+    assert "0.00" not in table, "an unmeasured metric must never render as a number"
+
+
+def test_delta_direction_respects_lower_is_better():
+    from sub1b_vla.bench.metrics import BenchmarkMetrics
+    from sub1b_vla.bench.report import render_table
+
+    base = BenchmarkMetrics(driving_score=50.0, collisions_per_km=1.0)
+    ours = BenchmarkMetrics(driving_score=60.0, collisions_per_km=0.5)
+    table = render_table(base, ours)
+    ds_row = next(l for l in table.splitlines() if "Driving Score" in l)
+    col_row = next(l for l in table.splitlines() if "Collision Rate" in l)
+    assert "better" in ds_row, "a higher driving score is an improvement"
+    assert "better" in col_row, "a lower collision rate is an improvement"
+
+
+def test_hard_constraint_report_distinguishes_zero_from_unmeasured():
+    from sub1b_vla.bench.metrics import BenchmarkMetrics
+    from sub1b_vla.bench.run_benchmark import hard_constraint_report
+
+    satisfied = hard_constraint_report(BenchmarkMetrics(red_light_per_km=0.0,
+                                                       sidewalk_per_km=0.0))
+    assert all("SATISFIED" in line for line in satisfied)
+    unknown = hard_constraint_report(BenchmarkMetrics())
+    assert all("NOT MEASURED" in line for line in unknown)
+    violated = hard_constraint_report(BenchmarkMetrics(red_light_per_km=0.3,
+                                                      sidewalk_per_km=0.0))
+    assert any("VIOLATED" in line for line in violated)

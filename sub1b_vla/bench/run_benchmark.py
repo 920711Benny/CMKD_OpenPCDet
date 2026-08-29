@@ -44,7 +44,7 @@ LONGTAIL_SCENARIOS = ("occluded_pedestrian", "cut_in_vehicle", "blind_intersecti
 def launch_command(cfg_path: str, ckpt: str, suite: str, out: str, weather: str) -> str:
     s = BENCHMARK_SUITES[suite]
     return (
-        f"SUB1B_CONFIG={cfg_path} SUB1B_CHECKPOINT={ckpt} SUB1B_HUD=1 \\\n"
+        f"SUB1B_CONFIG={cfg_path} SUB1B_CHECKPOINT={ckpt} SUB1B_HUD=1 SUB1B_QUIET=1 \\\n"
         f"  python3 leaderboard/leaderboard/leaderboard_evaluator.py \\\n"
         f"    --agent sub1b_vla/carla_agent/agent.py \\\n"
         f"    --routes {s['routes']} \\\n"

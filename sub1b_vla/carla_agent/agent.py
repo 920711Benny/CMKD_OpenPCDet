@@ -13,7 +13,10 @@ Environment:
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +53,17 @@ except ImportError:  # pragma: no cover
         SENSORS = "SENSORS"
 
 
+# Output Separation Protocol: during a benchmark run the terminal carries only
+# the table, so the agent's own progress prints are suppressed. Errors still
+# raise, and the latency report is still written to disk.
+QUIET = os.environ.get("SUB1B_QUIET", "0") == "1"
+
+
+def _say(msg: str) -> None:
+    if not QUIET:
+        print(msg, flush=True)
+
+
 # CARLA RoadOption -> the command ids used during training.
 ROAD_OPTION_TO_COMMAND = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
 DEFAULT_COMMAND = 3  # LANEFOLLOW
@@ -62,6 +76,9 @@ class Sub1BVLAAgent(AutonomousAgent):
             raise RuntimeError("Set SUB1B_CONFIG (or pass a config) for Sub1BVLAAgent.")
         self.cfg = load_config(cfg_path)
         setup_scratch_dirs(self.cfg)
+        if QUIET:
+            logging.disable(logging.WARNING)
+            warnings.simplefilter("ignore")
         self.track = Track.SENSORS
         self.rig = CameraRig.from_config(self.cfg)
         self.image_size = self.cfg["model"]["image_size"]
@@ -136,8 +153,10 @@ class Sub1BVLAAgent(AutonomousAgent):
     def destroy(self):
         if getattr(self, "runtime", None) is not None:
             report = self.runtime.latency_report()
-            Path("runs").mkdir(exist_ok=True)
-            (Path("runs") / "latency_report.json").write_text(str(report))
+            out = Path(os.environ.get("SUB1B_RUNS", "runs"))
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "latency_report.json").write_text(json.dumps(report, indent=2))
+            _say(f"[agent] latency report -> {out / 'latency_report.json'}")
             self.runtime.stop()
         if getattr(self, "hud", None) is not None:
             self.hud.close()
@@ -157,8 +176,8 @@ def load_agent_model(cfg: dict, checkpoint: str | None, device):
         missing, unexpected = model.load_state_dict(state["model"], strict=False)
         trained = set(state["model"])
         skipped = [n for n in missing if n in trained]
-        print(f"[agent] loaded {len(trained)} trained tensors from {checkpoint}; "
-              f"{len(unexpected)} unexpected, {len(skipped)} expected-but-missing.")
+        _say(f"[agent] loaded {len(trained)} trained tensors from {checkpoint}; "
+             f"{len(unexpected)} unexpected, {len(skipped)} expected-but-missing.")
     elif os.environ.get("SUB1B_ALLOW_UNTRAINED") != "1":
         raise RuntimeError(
             "No SUB1B_CHECKPOINT given. Driving on untrained weights produces "

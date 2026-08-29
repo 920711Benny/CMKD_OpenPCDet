@@ -34,6 +34,7 @@ case "$cmd" in
   launch)
     for suite in town05_long town05_hard; do
       for weather in ClearNoon HardRainNoon WetCloudySunset MidRainyNight; do
+        echo "# SUB1B_QUIET=1 keeps the terminal free for the benchmark table"
         python3 -m sub1b_vla.bench.run_benchmark --config "$CONFIG" \
           --checkpoint "$1" --suite "$suite" --weather "$weather" --print-launch
         echo
