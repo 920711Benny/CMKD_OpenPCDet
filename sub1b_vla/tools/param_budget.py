@@ -25,6 +25,18 @@ DINOV2_BASE = dict(hidden=768, layers=12, heads=12, mlp=3072, patch=14,
 SIGLIP_BASE = dict(hidden=768, layers=12, heads=12, mlp=3072, patch=16,
                    image=224, layerscale=False, qkv_bias=True, cls=False,
                    pooling_head=True)
+# Published configs of the larger pair used by the CarlaVLA config.
+DINOV2_LARGE = dict(hidden=1024, layers=24, heads=16, mlp=4096, patch=14,
+                    image=518, layerscale=True, qkv_bias=True, cls=True)
+SIGLIP_LARGE_384 = dict(hidden=1024, layers=24, heads=16, mlp=4096, patch=16,
+                        image=384, layerscale=False, qkv_bias=True, cls=False,
+                        pooling_head=True)
+SIGLIP_BASE_384 = dict(hidden=768, layers=12, heads=12, mlp=3072, patch=16,
+                       image=384, layerscale=False, qkv_bias=True, cls=False,
+                       pooling_head=True)
+SIGLIP_SO400M = dict(hidden=1152, layers=27, heads=16, mlp=4304, patch=14,
+                     image=384, layerscale=False, qkv_bias=True, cls=False,
+                     pooling_head=True)
 QWEN2_05B = dict(hidden=896, layers=24, heads=14, kv_heads=2, head_dim=64,
                  intermediate=4864, vocab=151936, tie_embeddings=True)
 
@@ -32,6 +44,12 @@ VISION_SPECS = {
     "facebook/dinov2-small": DINOV2_SMALL,
     "facebook/dinov2-base": DINOV2_BASE,
     "google/siglip-base-patch16-224": SIGLIP_BASE,
+    "facebook/dinov2-large": DINOV2_LARGE,
+    "pretrained/dinov2-large": DINOV2_LARGE,
+    "google/siglip-so400m-patch14-384": SIGLIP_SO400M,
+    "pretrained/siglip-so400m": SIGLIP_SO400M,
+    "google/siglip-large-patch16-384": SIGLIP_LARGE_384,
+    "google/siglip-base-patch16-384": SIGLIP_BASE_384,
 }
 
 

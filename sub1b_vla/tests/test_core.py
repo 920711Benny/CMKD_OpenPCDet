@@ -1219,3 +1219,50 @@ def test_flash_attention_runs_under_explicit_opt_in(monkeypatch):
     out, _ = attn(x, x, x)
     assert out.shape == (1, 5, 32)
     assert attn.last_backend == "math_fallback", attn.last_backend
+
+
+# ---------------------------------------------------------- config audit
+def test_carlavla_v3_mirror_is_over_the_parameter_budget():
+    """The shipped CarlaVLA v3 config pairs DINOv2-large with SigLIP-so400m,
+    which together with the InternVL2-1B decoder exceeds the <1B constraint.
+    Pinned so the finding cannot be lost."""
+    from sub1b_vla.tools.param_budget import build_report
+
+    rep = build_report(load_config("sub1b_vla/configs/carlavla_v3.yaml"))
+    assert not rep["within_budget"]
+    assert rep["total"] > 1.2e9, rep["total"]
+
+
+def test_audit_suggests_only_backbone_pairs_that_actually_fit():
+    from sub1b_vla.tools.config_audit import fitting_backbone_pairs
+    from sub1b_vla.tools.param_budget import build_report
+
+    cfg = load_config("sub1b_vla/configs/carlavla_v3.yaml")
+    rep = build_report(cfg)
+    vision = sum(n for name, _, n in rep["rows"] if "backbone" in name)
+    pairs = fitting_backbone_pairs(cfg, rep["total"] - vision)
+    assert pairs, "no fitting backbone pair was found"
+    for _a, _b, total in pairs:
+        assert total < cfg["param_limit"], (_a, _b, total)
+
+
+def test_audit_flags_dataloader_starvation_and_batch_mismatch():
+    from sub1b_vla.tools.config_audit import audit
+
+    findings = audit(load_config("sub1b_vla/configs/carlavla_v3.yaml"))
+    titles = " | ".join(f.title for f in findings)
+    assert "num_workers=0" in titles
+    assert "Effective batch 8" in titles
+    assert "16-mixed" in titles
+    assert "CoT share is 40%" in titles
+    # num_workers=0 across 2 GPUs starves both, so it is a blocker not a warning.
+    starve = next(f for f in findings if "num_workers=0" in f.title)
+    assert starve.level == "BLOCKER"
+
+
+def test_audit_passes_a_config_that_satisfies_the_constraints():
+    from sub1b_vla.tools.config_audit import audit
+
+    findings = audit(load_config("sub1b_vla/configs/default.yaml"))
+    blockers = [f for f in findings if f.level == "BLOCKER"]
+    assert not blockers, [f.title for f in blockers]
