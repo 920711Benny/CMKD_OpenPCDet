@@ -1,0 +1,93 @@
+# Sub-1B Dual-Head Diffusion VLA -- single RTX PRO 6000 training config.
+experiment: dualhead_coc_diffusion_vla
+seed: 1337
+param_limit: 1000000000          # hard gate, enforced at model construction
+
+model:
+  # Language: InternVL2-1B's Qwen2-0.5B decoder ONLY. Its native 0.30B InternViT
+  # tower is dropped -- the dual-head encoder replaces it and that is what keeps
+  # the total under 1B.
+  language_model: OpenGVLab/InternVL2-1B
+  use_language_tower_only: true
+  spatial_model: facebook/dinov2-small        # geometry / depth / affordance
+  semantic_model: google/siglip-base-patch16-224   # global semantics for the LLM
+  freeze: true                    # both vision backbones frozen
+  allow_stub: true                # fall back to random ViT if weights unavailable
+  embed_dim: 896                  # == Qwen2-0.5B hidden size
+  spatial_dim: 256
+  num_semantic_tokens: 32
+  image_size: 224
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  pred_len: 11                    # waypoints
+  waypoint_dt: 0.2                # s between waypoints (2.2 s horizon)
+  diffusion_train_steps: 100
+  diffusion_infer_steps: 10
+  diffusion_dim: 256
+  diffusion_depth: 4
+  diffusion_heads: 8
+
+loss:
+  lm: 1.0
+  diffusion: 1.0
+  consistency: 0.2
+  align_warmup_steps: 2000
+
+consistency:
+  stop_speed: 0.3
+  decel: -0.5
+  accel: 0.5
+  keep_accel_band: 1.0
+  turn_heading: 0.15
+  lane_change_lateral: 1.5
+  straight_lateral: 1.0
+
+data:
+  root: ./data
+  drivecot_weight: 0.4            # share of samples drawn from the CoT/QA pool
+  use_safety_flag: true
+  easy_hard_split_2to8: true      # 20% easy / 80% long-tail
+  scenario_bucketing: true
+  img_augmentation: true
+  cut_bottom_quarter: true        # drop ego hood/bonnet rows
+  route_as: target_point_command
+  max_text_len: 96
+  synthetic: false                # true => procedural data, no disk required
+  synthetic_size: 512
+
+train:
+  precision: bf16-mixed
+  strategy: auto
+  devices: 1
+  batch_size: 12
+  accumulate_grad_batches: 2
+  num_workers: 8
+  max_steps: 60000
+  lr: 2.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.01
+  warmup_steps: 1000
+  grad_clip: 1.0
+  log_every: 50
+  ckpt_every: 2000
+  out_dir: ./runs
+
+sensors:
+  # CARLA standard front RGB rig.
+  rgb_front:
+    x: 1.3
+    y: 0.0
+    z: 2.3
+    pitch: -5.0
+    roll: 0.0
+    yaw: 0.0
+    fov: 100
+    width: 1024
+    height: 512
+
+inference:
+  control_hz: 10                  # trajectory loop target
+  latency_budget_ms: 80
+  cot_hz: 1                       # async rationale refresh
+  controller: pure_pursuit_pid

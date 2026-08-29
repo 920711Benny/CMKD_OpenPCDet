@@ -1,0 +1,20 @@
+# Core (required)
+torch>=2.1
+numpy>=1.24
+pyyaml>=6.0
+
+# Backbones / tokenizers. Without these the code falls back to randomly
+# initialised stubs and says so loudly -- fine for smoke tests, not for research.
+transformers>=4.40
+accelerate>=0.30
+sentencepiece
+pillow
+
+# HUD (optional; the compositor degrades to PNG dumps without it)
+pygame>=2.5
+
+# Dev
+pytest>=7.4
+
+# CARLA (install from your simulator distribution, not PyPI):
+#   carla==0.9.14  + the leaderboard / scenario_runner packages on PYTHONPATH
