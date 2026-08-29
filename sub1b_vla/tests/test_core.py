@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import pathlib
 import warnings
 
 import numpy as np
@@ -1288,3 +1289,51 @@ def test_audit_passes_a_config_that_satisfies_the_constraints():
     findings = audit(load_config("sub1b_vla/configs/default.yaml"))
     blockers = [f for f in findings if f.level == "BLOCKER"]
     assert not blockers, [f.title for f in blockers]
+
+
+def test_tuned_carlavla_config_clears_every_blocker():
+    """The tuned config must have no blockers left. Pinned so a later edit
+    cannot quietly reintroduce the dataloader starvation or the batch/lr
+    mismatch that the original had."""
+    from sub1b_vla.tools.config_audit import audit
+
+    findings = audit(load_config("sub1b_vla/configs/carlavla_v3_tuned.yaml"))
+    blockers = [f.title for f in findings if f.level == "BLOCKER"]
+    assert not blockers, blockers
+
+    ok = {f.title for f in findings if f.level == "OK"}
+    assert any("Effective batch 48" in t for t in ok)
+    assert any("bf16-mixed" in t for t in ok)
+    assert any("CoT share 60%" in t for t in ok)
+
+
+def test_tuned_config_preserves_every_hydra_key_of_the_original():
+    """The tuned file is a drop-in replacement: it may change values, but it
+    must not drop keys or rewrite _target_ paths, or hydra will fail to build
+    the objects."""
+    import yaml
+
+    orig = pathlib.Path("configs_carlavla/config_original.yaml")
+    tuned = pathlib.Path("configs_carlavla/config_tuned.yaml")
+    if not orig.exists():
+        pytest.skip("original config not vendored")
+
+    def flat(d, prefix=""):
+        out = {}
+        for k, v in (d or {}).items():
+            key = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, dict):
+                out.update(flat(v, key))
+            else:
+                out[key] = v
+        return out
+
+    a = flat(yaml.safe_load(orig.read_text()))
+    b = flat(yaml.safe_load(tuned.read_text()))
+    # train_partitions goes from a null scalar to a mapping, so its leaf key
+    # legitimately disappears; nothing else may.
+    missing = {k for k in a if k not in b} - {"data_module.train_partitions"}
+    assert not missing, missing
+    for key, val in a.items():
+        if key.endswith("_target_"):
+            assert b.get(key) == val, f"_target_ changed: {key}"

@@ -1,0 +1,89 @@
+model:
+  vision_model:
+    variant: dual_vision
+    embed_dim: 896
+    freeze: true
+    dinov2_path: pretrained/dinov2-large
+    siglip_path: pretrained/siglip-so400m
+    use_global_img: false
+    _target_: simlingo_training.models.encoder.vlm.VLMEncoderModel
+  language_model:
+    variant: OpenGVLab/InternVL2-1B
+    lora: true
+    lora_alpha: 64
+    lora_r: 32
+    lora_dropout: 0.1
+    _target_: simlingo_training.models.language_model.llm.LLM
+  lr: 3.0e-05
+  weight_decay: 0.1
+  betas:
+  - 0.9
+  - 0.999
+  pct_start: 0.05
+  speed_wps_mode: 2d
+  predict_route_as_wps: true
+  use_diffusion: true
+  diffusion_train_steps: 100
+  diffusion_infer_steps: 10
+  _target_: simlingo_training.models.driving.DrivingModel
+data_module:
+  base_dataset:
+    data_path: database
+    bucket_path: database
+    cut_bottom_quarter: true
+    use_1d_wps: false
+    use_commentary: true
+    use_qa: true
+    qa_augmentation: true
+    commentary_augmentation: true
+    use_old_towns: true
+    use_only_old_towns: false
+    use_town13: true
+    filter_infractions_per_route: false
+    skip_first_n_frames: 10
+    pred_len: 11
+    hist_len: 1
+    hist_len_commentary: 5
+    img_augmentation: true
+    img_augmentation_prob: 0.5
+    img_shift_augmentation: false
+    img_shift_augmentation_prob: 0.5
+    use_safety_flag: true
+    num_route_points: 20
+    route_as: target_point_command
+    use_lmdrive_commands: true
+  driving_dataset:
+    _target_: simlingo_training.dataloader.dataset_driving.Data_Driving
+  dreamer_dataset: null
+  drivecot_dataset:
+    _target_: simlingo_training.dataloader.dataset_drivecot.Data_DriveCoT
+  qa_dataset:
+    _target_: simlingo_training.dataloader.dataset_eval_qa_comm.Data_Eval
+  insteval_dataset:
+    _target_: simlingo_training.dataloader.dataset_eval_dreamer.Eval_Dreamer
+  batch_size: 4
+  num_workers: 0
+  train_partitions: null
+  train_partitions_dreamer: null
+  train_partitions_drivecot: null
+  drivecot_weight: 0.4
+  use_global_img: false
+  easy_hard_split_2to8: true
+  _target_: simlingo_training.dataloader.datamodule.DataModule
+seed: 9876
+gpus: 2
+resume: false
+resume_path: null
+debug: false
+overfit: 0
+fp16_loss_scale: 32.0
+enable_wandb: false
+wandb_project: simlingo
+name: carlavla_v3_diffusion_cfg_10ep
+wandb_name: 2026_06_30_diffusion
+max_epochs: 10
+precision: 16-mixed
+strategy: deepspeed_stage_2
+val_every_n_epochs: 5
+checkpoint: null
+checkpoint_every_n_steps: 2500
