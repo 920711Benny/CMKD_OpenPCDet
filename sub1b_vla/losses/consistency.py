@@ -35,7 +35,8 @@ from ..models.coc_prompt import INTENTS
 class TrajectoryDynamics:
     speed: torch.Tensor        # (B, T-1) instantaneous speed, m/s
     accel: torch.Tensor        # (B,)     mean longitudinal acceleration, m/s^2
-    final_speed: torch.Tensor  # (B,)
+    final_speed: torch.Tensor  # (B,)     robust end speed (mean of last third)
+    terminal_speed: torch.Tensor  # (B,)  speed over the LAST segment only
     displacement: torch.Tensor # (B,)     total path length, m
     heading_change: torch.Tensor  # (B,)  net heading change, rad (+left)
     lateral_offset: torch.Tensor  # (B,)  lateral offset at horizon, m (+left)
@@ -64,6 +65,12 @@ def compute_dynamics(waypoints: torch.Tensor, dt: float = 0.2) -> TrajectoryDyna
     return TrajectoryDynamics(
         speed=speed,
         accel=accel,
+        # `final_speed` averages the last third: robust, and right for judging
+        # acceleration trends. It is WRONG for judging arrival at rest -- braking
+        # from 45 km/h to a stop line still averages ~1 m/s over that window, so a
+        # genuine stop would never register. `terminal_speed` is the last segment
+        # alone, which is what "ended at rest" actually means.
+        terminal_speed=speed[:, -1],
         final_speed=v1,
         displacement=seg.sum(dim=1),
         heading_change=heading_change,
@@ -97,7 +104,7 @@ def intent_violations(
     # "stop" is satisfied by COMING TO REST within the horizon, not by standing
     # still: braking from 45 km/h to zero covers real ground, and penalising that
     # displacement would make every legitimate stop-line approach a violation.
-    v["stop"] = _sq_relu(dyn.final_speed - th.stop_speed)
+    v["stop"] = _sq_relu(dyn.terminal_speed - th.stop_speed)
     v["decelerate"] = _sq_relu(dyn.accel - th.decel)
     v["accelerate"] = _sq_relu(th.accel - dyn.accel)
     v["keep_speed"] = (

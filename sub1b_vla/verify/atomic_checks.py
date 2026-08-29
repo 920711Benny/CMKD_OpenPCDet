@@ -117,8 +117,10 @@ def gate_red_light_stop(model, cfg, device, n=64, max_final_speed=0.5,
                         max_throttle_rate=0.15) -> GateResult:
     """Stop-line adherence.
 
-    Measured on the trajectory's FINAL speed, not on its mean speed over the
-    next second. Braking from 45 km/h to a stop line is still moving at 9 m/s a
+    Measured on the trajectory's TERMINAL speed -- the last segment -- not on
+    its mean speed over the next second, and not on the robust mean of the last
+    third (braking from 45 km/h averages ~1 m/s over that window, so no genuine
+    stop could pass). Braking from 45 km/h to a stop line is still moving at 9 m/s a
     second in -- judging the approach speed would fail every correct stop and
     only pass a vehicle that was already stationary. What must hold is that the
     trajectory ENDS at rest and that no throttle is commanded on the way.
@@ -136,8 +138,9 @@ def gate_red_light_stop(model, cfg, device, n=64, max_final_speed=0.5,
         dyn = compute_dynamics(torch.from_numpy(wps).float(),
                                cfg["model"].get("waypoint_dt", 0.2))
         res[name] = {
-            "mean_final_speed_ms": float(dyn.final_speed.mean()),
-            "stopped_rate": float((dyn.final_speed.numpy() <= max_final_speed).mean()),
+            "mean_final_speed_ms": float(dyn.terminal_speed.mean()),
+            "stopped_rate": float((dyn.terminal_speed.numpy() <= max_final_speed).mean()),
+            "mean_robust_end_speed_ms": float(dyn.final_speed.mean()),
             "throttle_rate": float((throttle > 0.1).mean()),
             "mean_target_speed_ms": float(np.mean([c.target_speed for c in ctrls])),
             "mean_displacement_m": float(dyn.displacement.mean()),

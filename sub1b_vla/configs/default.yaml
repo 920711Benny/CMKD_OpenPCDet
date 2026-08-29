@@ -85,6 +85,12 @@ data:
   hist_len: 1                     # single frame, as SimLingo
   skip_first_n_frames: 10         # drop each route's settling frames
   num_route_points: 20
+  # Generate Chain-of-Causation labels from privileged CARLA state
+  # (bounding boxes + measurements) rather than only consuming the
+  # release's language files. Each generated label is verified against
+  # the expert trajectory and dropped if it does not hold.
+  generate_cot: true
+  qa_probability: 0.35
   use_commentary: true
   use_qa: true
   qa_augmentation: true

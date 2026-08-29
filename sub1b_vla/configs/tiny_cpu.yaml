@@ -43,6 +43,8 @@ data:
   root: ./data
   train_partitions: {driving: 0.25, drivecot: 0.60, dreamer: 0.15}
   drivecot_weight: 0.4
+  generate_cot: true
+  qa_probability: 0.35
   use_safety_flag: true
   easy_hard_split_2to8: true
   scenario_bucketing: true

@@ -4,6 +4,7 @@
 #   ./run_pipeline.sh budget            parameter-budget gate (<1B)
 #   ./run_pipeline.sh test              unit tests
 #   ./run_pipeline.sh prepare <dataset> CARLA logs -> training manifests
+#   ./run_pipeline.sh gen-cot <dataset> [mult]  expand the CoT pool from CARLA state
 #   ./run_pipeline.sh train             single-GPU training
 #   ./run_pipeline.sh verify <ckpt>     atomic gates (terminal gate)
 #   ./run_pipeline.sh align <ckpt>      Action-CoT alignment score
@@ -26,6 +27,9 @@ case "$cmd" in
   budget)  python3 -m sub1b_vla.tools.param_budget --config "$CONFIG" ;;
   test)    python3 -m pytest sub1b_vla/tests -q ;;
   prepare) python3 -m sub1b_vla.data.prepare_carla_data --root "$1" --out "$1" ;;
+  gen-cot)
+    python3 -m sub1b_vla.data.generate_cot --root "$1" \
+      --out "$1/cot_generated.jsonl" --multiplier "${2:-2}" ;;
   train)   python3 -m sub1b_vla.train.train --config "$CONFIG" "$@" ;;
   verify)
     python3 -m sub1b_vla.verify.atomic_checks --config "$CONFIG" \

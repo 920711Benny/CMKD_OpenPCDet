@@ -882,3 +882,127 @@ def test_recorded_augmentation_correction_is_exact():
     rotated = apply_recorded_augmentation(wps, 0.0, 10.0)
     assert np.allclose(np.linalg.norm(rotated, axis=1), np.linalg.norm(wps, axis=1), atol=1e-3)
     assert rotated[-1, 1] < -0.5, "a +10 deg camera yaw moves targets to the right"
+
+
+# --------------------------------------------------------- CoT generation
+def _red_light_box(distance):
+    return {"class": "traffic_light", "state": "Red", "affects_ego": True,
+            "position": [distance, 1.2, 4.5], "distance": distance,
+            "extent": [0.4, 0.4, 1.2]}
+
+
+def _walker_box(distance, lateral_right=0.0):
+    return {"class": "walker", "position": [distance, lateral_right, 0.0],
+            "distance": distance, "speed": 1.2, "extent": [0.3, 0.3, 0.9]}
+
+
+def _stopping_traj(v0, n=11, dt=0.2):
+    v, x, pts = v0, 0.0, []
+    for _ in range(n):
+        v = max(0.0, v - (v0 / (n * dt)) * dt)
+        x += v * dt
+        pts.append((x, 0.0))
+    return np.array(pts, dtype=np.float32)
+
+
+def _cruise_traj(v, n=11, dt=0.2):
+    return np.stack([np.cumsum(np.full(n, v * dt)), np.zeros(n)], 1).astype(np.float32)
+
+
+def test_parse_boxes_converts_carla_lateral_sign():
+    """CARLA's ego frame is left-handed (+y right); this codebase uses +y left."""
+    from sub1b_vla.data.cot_generator import parse_boxes
+
+    objs = parse_boxes([{"class": "car", "position": [10.0, 3.0, 0.0], "distance": 10.0}])
+    assert objs[0].lateral == pytest.approx(-3.0), "+y right must become -y left"
+
+
+def test_ego_car_and_vqa_duplicates_are_excluded():
+    from sub1b_vla.data.cot_generator import parse_boxes
+
+    boxes = [{"class": "ego_car", "position": [0, 0, 0], "distance": -1},
+             {"class": "traffic_light_vqa", "position": [10, 0, 0], "distance": 10},
+             {"class": "walker", "position": [8, 0, 0], "distance": 8}]
+    kinds = [o.kind for o in parse_boxes(boxes)]
+    assert kinds == ["walker"]
+
+
+def test_binding_constraint_is_distance_aware():
+    """A red light beyond braking distance must not forbid holding speed --
+    otherwise the label teaches the model to brake on sight."""
+    from sub1b_vla.data.cot_generator import binding_constraint, parse_boxes
+
+    speed = 9.0
+    near = parse_boxes([_red_light_box(6.0)])
+    far = parse_boxes([_red_light_box(40.0)])
+    _, _, allowed_near = binding_constraint(near, speed)
+    _, _, allowed_far = binding_constraint(far, speed)
+    assert "keep_speed" not in allowed_near
+    assert "keep_speed" in allowed_far
+
+
+def test_pedestrian_is_binding_at_any_range():
+    """A walker can step into the path, so the braking-distance argument that
+    applies to a signal does not license holding speed."""
+    from sub1b_vla.data.cot_generator import binding_constraint, parse_boxes
+
+    _, _, allowed = binding_constraint(parse_boxes([_walker_box(25.0)]), 9.0)
+    assert allowed == {"stop", "decelerate"}
+
+
+def test_generated_label_is_rejected_when_it_contradicts_the_trajectory():
+    """The whole point of the verification gate: a rationale that does not
+    predict the action must be dropped, not shipped."""
+    from sub1b_vla.data.cot_generator import generate
+
+    good = generate([_red_light_box(6.0)], _stopping_traj(9.0), 9.0)
+    bad = generate([_red_light_box(6.0)], _cruise_traj(9.0), 9.0)
+    assert good.verified, good.rejection
+    assert good.intent == "stop"
+    assert not bad.verified
+    assert "contradicts the binding constraint" in bad.rejection
+
+
+def test_generated_perception_names_the_actual_object():
+    from sub1b_vla.data.cot_generator import generate
+
+    g = generate([_walker_box(9.0)], _stopping_traj(8.0), 8.0)
+    assert "pedestrian" in g.sample.perception
+    assert g.sample.safety_flag
+    assert g.verified
+
+
+def test_generated_label_never_claims_a_clear_road_beside_objects():
+    from sub1b_vla.data.cot_generator import generate
+
+    parked = [{"class": "car", "color_name": "grey", "base_type": "car",
+               "position": [12.0, 4.2, 0.0], "distance": 12.0, "speed": 0.0,
+               "lane_relative_to_ego": 1, "same_direction_as_ego": True}]
+    g = generate(parked, _cruise_traj(7.0), 7.0)
+    assert "clear road" not in g.sample.perception, g.sample.perception
+    assert "grey" in g.sample.perception
+
+
+def test_generated_qa_is_grounded_in_the_state():
+    from sub1b_vla.data.cot_generator import generate_qa
+
+    pairs = generate_qa([_red_light_box(6.0)], _stopping_traj(9.0), 9.0,
+                        rng=np.random.default_rng(0), max_pairs=5)
+    assert pairs
+    joined = " ".join(f"{p['Q']} {p['A']}" for p in pairs).lower()
+    assert "red" in joined or "stop" in joined
+
+
+def test_executed_intent_detects_a_full_stop_at_any_approach_speed():
+    """Regression: `stop` was measured on the mean of the last third, so braking
+    from 45 km/h read as ~1.1 m/s and never registered as a stop."""
+    from sub1b_vla.data.cot_generator import executed_intent
+
+    for v0 in (3.0, 8.0, 12.5):
+        assert executed_intent(_stopping_traj(v0)) == "stop", f"{v0 * 3.6:.0f} km/h"
+
+
+def test_terminal_speed_differs_from_robust_final_speed_on_a_stop():
+    dyn = compute_dynamics(torch.tensor(_stopping_traj(12.5))[None], dt=0.2)
+    assert float(dyn.terminal_speed) == pytest.approx(0.0, abs=1e-3)
+    assert float(dyn.final_speed) > 0.5, "the robust mean should still be non-zero"
