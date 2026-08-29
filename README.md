@@ -78,6 +78,36 @@ both towers would put the model at ~1.1 B and break the constraint. Verify with:
 ./run_pipeline.sh budget          # exits non-zero if over budget
 ```
 
+### Diffusion parameterisation and waypoint normalisation
+
+Two choices here are load-bearing, and both were forced by measurement rather
+than taste.
+
+**Targets are normalised into [-1, 1]** by `(wp - offset) / scale`, with the
+constants stored as buffers so they travel with the checkpoint. Feeding raw
+metres (σ ≈ 5 m forward, values to 31 m) to a schedule that assumes unit-scale
+data makes the signal dominate the noise at nearly every timestep: ε-prediction
+collapses toward returning its input, the training loss goes low, and sampling
+from pure noise diverges. This is what the atomic gates caught — training loss
+0.085 alongside a **164 m** spread across noise draws. Min-max rather than
+std normalisation is deliberate: it lets the sampler clip `x0` at ±1 without ever
+truncating a valid trajectory, which std scaling cannot promise when a 30 m
+waypoint is 6σ. Derive the constants for your data with
+`python -m sub1b_vla.tools.waypoint_stats --config ...`.
+
+**v-parameterisation** (Salimans & Ho) instead of ε-prediction. ε is poorly
+conditioned at low SNR — exactly where a 10-step schedule spends most of its
+steps. Measured on a controlled overfit, mean absolute waypoint error:
+
+| parameterisation | DDIM-10 (configured) | DDIM-25 | DDIM-100 |
+|---|---:|---:|---:|
+| epsilon | 2.607 m | 1.723 m | 0.400 m |
+| **v** | **0.690 m** | 0.549 m | 0.716 m |
+
+v at the 10-step budget beats ε at 100 steps. Since ≥10 Hz control is a hard
+requirement, this is what makes the short schedule usable. Switch with
+`model.prediction_type: epsilon` to reproduce the comparison.
+
 ### Causal Consistency Loss
 
 For each canonical intent `k` a differentiable violation `V_k(tau) >= 0` is zero
@@ -185,8 +215,10 @@ HuggingFace hub blocked by the network proxy**. Being precise about which is whi
 * Parameter budget — 0.630 B, from architecture-exact replicas whose counts were
   cross-checked against independent analytic formulas (the tool raises if they
   disagree) and which match the published sizes of all three backbones.
-* 37/37 unit tests, covering frame/sign conventions, loss semantics, DDIM
-  determinism, and the async runtime's non-blocking contract.
+* 52 unit tests, covering frame/sign conventions, loss semantics, DDIM
+  determinism, waypoint normalisation, and the async runtime's non-blocking
+  contract.
+* The v-vs-ε comparison table above, from a controlled overfit.
 * Full training loop convergence on the procedural sanity dataset.
 * Camera projection, controller sign conventions, HUD compositing.
 

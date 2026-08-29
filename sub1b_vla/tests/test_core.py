@@ -318,15 +318,26 @@ def test_async_runtime_control_path_never_blocks_on_rationale(model, cfg):
 
     s = cfg["model"]["image_size"]
     with AsyncVLARuntime(model, torch.device("cpu"), cfg) as rt:
-        time.sleep(0.15)  # let the rationale worker start
         for _ in range(5):
             p = rt.perceive(np.random.randn(3, s, s).astype(np.float32),
                             10.0, np.zeros(2, np.float32), 3)
             assert p.waypoints.shape == (cfg["model"]["pred_len"], 2)
+        # Give the rationale worker a bounded chance to publish.
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            _, frame = rt.latest_rationale()
+            if frame >= 0:
+                break
+            time.sleep(0.1)
         rep = rt.latency_report()
+        text, frame = rt.latest_rationale()
+
     assert rep["trajectory"]["n"] == 5
-    text, _ = rt.latest_rationale()
-    assert isinstance(text, str)
+    assert frame >= 0, "the rationale worker never published"
+    # A silent exception in the worker would surface here rather than passing
+    # as "some string was returned".
+    assert not text.startswith("(rationale unavailable"), text
+    assert rep["rationale"]["n"] >= 1, "no rationale latency was recorded"
 
 
 def test_latest_slot_returns_most_recent_value():
