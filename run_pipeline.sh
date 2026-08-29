@@ -7,6 +7,8 @@
 #   ./run_pipeline.sh train             single-GPU training
 #   ./run_pipeline.sh verify <ckpt>     atomic gates (terminal gate)
 #   ./run_pipeline.sh align <ckpt>      Action-CoT alignment score
+#   ./run_pipeline.sh instruct <ckpt>   instruction following / safety refusal
+#   ./run_pipeline.sh budget-time <N>   project training wall clock for N frames
 #   ./run_pipeline.sh launch <ckpt>     print the CARLA leaderboard command
 #   ./run_pipeline.sh report            benchmark table (terminal output only)
 set -euo pipefail
@@ -31,8 +33,13 @@ case "$cmd" in
   align)
     python3 -m sub1b_vla.bench.alignment_eval --config "$CONFIG" \
       --checkpoint "$1" --out "$RUN_DIR/alignment.json" --intent-source parsed ;;
+  instruct)
+    python3 -m sub1b_vla.bench.instruction_eval --config "$CONFIG" \
+      --checkpoint "$1" --out "$RUN_DIR/instruction.json" ;;
+  budget-time)
+    python3 -m sub1b_vla.tools.compute_budget --config "$CONFIG" --dataset-frames "$1" ;;
   launch)
-    for suite in town05_long town05_hard; do
+    for suite in town05_long town05_hard bench2drive; do
       for weather in ClearNoon HardRainNoon WetCloudySunset MidRainyNight; do
         echo "# SUB1B_QUIET=1 keeps the terminal free for the benchmark table"
         python3 -m sub1b_vla.bench.run_benchmark --config "$CONFIG" \
@@ -46,6 +53,7 @@ case "$cmd" in
       --baseline baselines/simlingo.json \
       --runtime "$RUN_DIR/latency_report.json" \
       --alignment "$RUN_DIR/alignment.json" \
+      --instruction "$RUN_DIR/instruction.json" \
       --json-out "$RUN_DIR/benchmark_summary.json" ;;
   *) sed -n '2,12p' "$0" ;;
 esac

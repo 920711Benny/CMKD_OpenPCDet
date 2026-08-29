@@ -661,3 +661,87 @@ def test_schedule_rejects_an_empty_budget():
 
     with pytest.raises(ValueError, match="max_epochs or train.max_steps"):
         resolve_schedule({"train": {"max_epochs": 0, "max_steps": 0}}, 100)
+
+
+# ------------------------------------------------- instruction following
+def test_unsafe_instruction_is_refused_and_trajectory_stays_safe():
+    """Language must not override a hazard. An 'accelerate' instruction at a red
+    light is refused, and the supervised trajectory remains the stop."""
+    from sub1b_vla.data.instructions import sample_instruction
+
+    rng = np.random.default_rng(0)
+    refused = 0
+    for _ in range(300):
+        s = sample_instruction(rng, "red_light", "stop")
+        assert s.executed_intent == "stop", "red light must always execute the safe intent"
+        if s.refused:
+            refused += 1
+            assert s.requested_intent in ("accelerate", "keep_speed")
+            assert "instruction_refused" in s.rationale()
+    assert refused > 0, "refusal must be sampled, not merely possible"
+
+
+def test_compliant_instruction_is_executed():
+    from sub1b_vla.data.instructions import sample_instruction
+
+    rng = np.random.default_rng(4)
+    seen = 0
+    for _ in range(200):
+        s = sample_instruction(rng, "free_flow", "keep_speed")
+        assert not s.refused, "free_flow has no hazard to refuse for"
+        assert s.executed_intent == s.requested_intent
+        seen += 1
+    assert seen == 200
+
+
+def test_instruction_rationale_parses_to_the_executed_intent():
+    """The rationale must decode to what was DONE, not what was asked -- the
+    consistency loss grades the executed trajectory."""
+    from sub1b_vla.data.instructions import sample_instruction
+
+    rng = np.random.default_rng(11)
+    for _ in range(200):
+        s = sample_instruction(rng, "pedestrian_crossing", "stop")
+        name, _ = parse_intent(s.rationale())
+        assert name == s.executed_intent
+
+
+def test_train_partitions_normalise_and_are_drawn():
+    from collections import Counter
+
+    from sub1b_vla.data.dataset import DrivingVLADataset
+
+    cfg = load_config(CFG)
+    cfg["data"]["train_partitions"] = {"driving": 2.0, "drivecot": 1.0, "dreamer": 1.0}
+    ds = DrivingVLADataset(cfg, "train")
+    assert sum(ds.partitions.values()) == pytest.approx(1.0)
+    assert ds.partitions["driving"] == pytest.approx(0.5)
+    counts = Counter(ds[i]["sample_type"] for i in range(400))
+    assert set(counts) == {"driving", "drivecot", "dreamer"}
+    assert counts["driving"] > counts["dreamer"]
+
+
+def test_empty_partitions_are_rejected():
+    from sub1b_vla.data.dataset import DrivingVLADataset
+
+    cfg = load_config(CFG)
+    cfg["data"]["train_partitions"] = {"driving": 0.0}
+    with pytest.raises(ValueError, match="train_partitions"):
+        DrivingVLADataset(cfg, "train")
+
+
+def test_dreamer_samples_supervise_the_diffusion_head_but_qa_does_not():
+    """Dreamer trajectories are real targets (the instruction's implied path);
+    QA/commentary waypoints are filler and must be masked out."""
+    from sub1b_vla.data.dataset import DrivingVLADataset
+
+    cfg = load_config(CFG)
+    ds = DrivingVLADataset(cfg, "train")
+    seen = {"driving": 0, "drivecot": 0, "dreamer": 0}
+    for i in range(300):
+        item = ds[i]
+        st = item["sample_type"]
+        seen[st] += 1
+        expected = 1.0 if st in ("driving", "dreamer") else 0.0
+        assert float(item["has_waypoints"]) == expected, st
+    assert all(v > 0 for v in seen.values()), seen

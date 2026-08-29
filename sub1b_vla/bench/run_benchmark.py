@@ -35,6 +35,12 @@ BENCHMARK_SUITES = {
         "routes": "leaderboard/data/routes_town05_hard.xml",
         "scenarios": "leaderboard/data/longtail_traffic_scenarios.json",
     },
+    # SimLingo reports on Bench2Drive as well; evaluating on the same suite is
+    # what makes a baseline column meaningful.
+    "bench2drive": {
+        "routes": "leaderboard/data/bench2drive220.xml",
+        "scenarios": "leaderboard/data/bench2drive_scenarios.json",
+    },
 }
 WEATHER_PRESETS = ("ClearNoon", "WetNoon", "HardRainNoon", "ClearSunset",
                    "WetCloudySunset", "SoftRainSunset", "MidRainyNight")
@@ -70,6 +76,38 @@ def hard_constraint_report(m: BenchmarkMetrics) -> list[str]:
     return out
 
 
+def language_capability_report(path: str | None) -> list[str]:
+    """Instruction following, reported as its own block.
+
+    Kept out of the driving table on purpose: the required table has a fixed set
+    of rows, and language metrics are not driving metrics. Refusal rate is
+    reported alongside compliance because a model that obeys every instruction --
+    including 'accelerate' at a red light -- would score a perfect compliance
+    rate while being unsafe. `safe_behaviour_rate` is reported under refusal
+    because a policy that simply always crawls scores a near-perfect refusal rate
+    without understanding anything; only the safe-action rate distinguishes
+    refusal from timidity.
+    """
+    if not path or not Path(path).exists():
+        return []
+    d = json.loads(Path(path).read_text())
+    rows = [
+        ("safe-instruction compliance rate", d.get("compliance_rate")),
+        ("unsafe-instruction refusal rate", d.get("refusal_rate")),
+        ("  ...of which correct safe action", d.get("safe_behaviour_rate")),
+        ("instruction samples", d.get("n")),
+    ]
+    out = []
+    for label, val in rows:
+        if val is None:
+            out.append(f"  {label:<36} --")
+        elif isinstance(val, int):
+            out.append(f"  {label:<36} {val}")
+        else:
+            out.append(f"  {label:<36} {val:.3f}")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -79,6 +117,7 @@ def main():
     ap.add_argument("--baseline", default=None, help="baseline metrics JSON")
     ap.add_argument("--runtime", default=None, help="latency report JSON from the agent")
     ap.add_argument("--alignment", default=None, help="alignment eval JSON")
+    ap.add_argument("--instruction", default=None, help="instruction-following eval JSON")
     ap.add_argument("--suite", choices=list(BENCHMARK_SUITES), default="town05_long")
     ap.add_argument("--weather", default="ClearNoon", choices=list(WEATHER_PRESETS))
     ap.add_argument("--print-launch", action="store_true",
@@ -108,6 +147,11 @@ def main():
     print(render_provenance(baseline, ours))
     print("\nhard constraints:")
     print("\n".join(hard_constraint_report(ours)))
+
+    lang = language_capability_report(args.instruction)
+    if lang:
+        print("\nlanguage capability (reported separately from the driving table):")
+        print("\n".join(lang))
 
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(

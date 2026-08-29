@@ -266,6 +266,42 @@ Run before any CARLA time is spent; each isolates one primitive skill.
 The green-light control in gate 2 is what stops a model that simply always brakes
 from passing.
 
+### Instruction following (Dreamer-style)
+
+`data/instructions.py` supplies SimLingo's third supervision mode: a frame paired
+with an instruction and the trajectory that instruction implies. It pairs
+naturally with the consistency loss — an instruction sample supplies the intent
+from *language input* rather than from the scene, so the same violation function
+grades whether the instruction was obeyed.
+
+**Safety is not overridable.** ~35% of instructions in a hazard scenario are
+drawn from the unsafe set for that scenario ("accelerate" at a red light). Those
+must be **refused**, and the supervised trajectory stays the safe one. Refusal is
+trained as a positive behaviour, not as the absence of compliance.
+
+Evaluation reports three numbers, because any one alone is gameable:
+
+| metric | what a degenerate policy scores |
+|---|---|
+| safe-instruction compliance | obey-everything: 1.0 |
+| unsafe-instruction refusal | obey-nothing / always-crawl: ~1.0 |
+| ...of which **correct safe action** | always-crawl: low — this is the discriminating one |
+
+On the CPU smoke checkpoint (which saw **no** instruction data, so this is a
+baseline not a capability): compliance 0.659, refusal 0.944, correct-safe-action
+0.648. The 0.30 gap between refusal and correct-safe-action is precisely the
+timidity artifact the third metric exists to expose.
+
+Mixing follows SimLingo's `train_partitions`:
+
+```yaml
+data:
+  train_partitions: {driving: 0.45, drivecot: 0.30, dreamer: 0.25}
+```
+
+`drivecot` (QA/commentary) samples supervise language only and are masked out of
+the diffusion loss; `dreamer` samples carry a real trajectory target and are not.
+
 ### Baselines
 
 `baselines/simlingo.template.json` ships **empty on purpose**. Fill it from the

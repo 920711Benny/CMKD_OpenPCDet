@@ -58,7 +58,14 @@ consistency:
 
 data:
   root: ./data
-  drivecot_weight: 0.4            # share of samples drawn from the CoT/QA pool
+  # SimLingo-style dataset mixing. `driving` = expert trajectories,
+  # `drivecot` = QA/commentary (language only), `dreamer` = instruction
+  # following, including instructions that must be REFUSED on safety grounds.
+  train_partitions:
+    driving: 0.45
+    drivecot: 0.30
+    dreamer: 0.25
+  drivecot_weight: 0.4            # shorthand fallback if train_partitions is unset
   use_safety_flag: true
   easy_hard_split_2to8: true      # 20% easy / 80% long-tail
   scenario_bucketing: true

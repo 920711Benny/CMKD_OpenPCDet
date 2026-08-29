@@ -41,6 +41,7 @@ consistency: {}
 
 data:
   root: ./data
+  train_partitions: {driving: 0.45, drivecot: 0.3, dreamer: 0.25}
   drivecot_weight: 0.4
   use_safety_flag: true
   easy_hard_split_2to8: true
