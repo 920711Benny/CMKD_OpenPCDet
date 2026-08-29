@@ -201,13 +201,17 @@ class CoCDiffusionHead(nn.Module):
 
     def loss(self, waypoints, geo, sem, speed, target_point, command,
              x0_clamp: float = 80.0):
-        """Returns (per-sample eps-MSE, clamped x0 estimate, timesteps, x0 reliability).
+        """Returns (per-sample MSE on the prediction target, x0 in metres,
+        timesteps, x0 reliability).
 
-        `reliability` is alpha_bar(t): the x0 recovered from a heavily-noised
-        sample is near-meaningless (it divides by sqrt(alpha_bar) -> 0), so any
-        downstream term that consumes x0 must down-weight those samples rather
-        than treat them as predictions. The clamp bounds the same pathology --
-        a 2.2 s horizon cannot physically exceed a few tens of metres.
+        The MSE is against velocity or epsilon per `prediction_type`.
+
+        `reliability` is alpha_bar(t). An x0 recovered from a heavily-noised
+        sample carries little information about the true trajectory whichever
+        parameterisation is used, so any downstream term consuming x0 -- the
+        causal consistency loss -- must down-weight those samples rather than
+        treat them as predictions. The clamp is a second bound: a 2.2 s horizon
+        cannot physically exceed a few tens of metres.
         """
         b = waypoints.shape[0]
         target = self.normalize(waypoints)
@@ -232,7 +236,10 @@ class CoCDiffusionHead(nn.Module):
     @torch.no_grad()
     def sample(self, geo, sem, speed, target_point, command, steps: int | None = None,
                generator: torch.Generator | None = None):
-        """Deterministic DDIM (eta=0) over an evenly spaced step subsequence."""
+        """Deterministic DDIM (eta=0) over an evenly spaced step subsequence.
+
+        Returns waypoints in METRES, denormalised from the [-1, 1] training space.
+        """
         steps = steps or self.infer_steps
         b = geo.shape[0]
         dev = geo.device
@@ -243,10 +250,11 @@ class CoCDiffusionHead(nn.Module):
             t = t_val.repeat(b)
             pred = self.denoise(x, t, geo, sem, speed, target_point, command)
             x0, eps = self._resolve(x, pred, t)
-            # Clip the x0 estimate to the data range at every step. At the first
-            # few steps alpha_bar is near zero, so this division amplifies any
-            # eps error without bound; unclipped DDIM diverges on an imperfect
-            # model even when the training loss is low.
+            # Clip the x0 estimate to the data range at every step. Early steps
+            # sit at near-zero alpha_bar, where a small prediction error moves x0
+            # a long way; unclipped DDIM diverges on an imperfect model even when
+            # the training loss is low. The min-max normalisation is what makes
+            # this clip safe -- real waypoints are guaranteed inside [-1, 1].
             if self.clip_denoised:
                 x0 = x0.clamp(-self.clip_denoised, self.clip_denoised)
                 # Re-derive eps from the clipped x0 so the DDIM update stays
