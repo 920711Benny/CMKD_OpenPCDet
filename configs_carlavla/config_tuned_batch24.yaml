@@ -1,18 +1,20 @@
-# CarlaVLA v3 -- tuned config (SAFE / conservative).
+# CarlaVLA v3 -- tuned config, EXPERIMENTAL HIGH BATCH.
+#
+# ####################################################################
+# #  Identical to config_tuned.yaml EXCEPT batch_size 4 -> 24.       #
+# #  DO NOT run this without checking it fits first:                 #
+# #      ./run_pipeline.sh preflight                                 #
+# #  24 x 2 GPUs restores SimLingo's effective batch of 48, so lr    #
+# #  stays at its original 3.0e-05. If it OOMs, use config_tuned.yaml#
+# #  (batch 4) -- that one is the safe default.                      #
+# ####################################################################
 #
 # Drop-in replacement for the shipped config.yaml: same hydra keys, same
 # _target_ paths, same structure. Every change is marked CHANGED with the
 # reason, and every original value is kept in the comment so nothing is lost.
-# The untouched original is vendored beside this file as config_original.yaml.
-#
-# batch_size STAYS AT 4. Memory on this model (DINOv2-large + SigLIP-so400m +
-# InternVL2-1B at 1024x512) has not been measured on your GPUs, so raising it
-# here would be a guess baked into the file you actually run. A higher-batch
-# variant is provided separately as config_tuned_batch24.yaml -- try that only
-# after `./run_pipeline.sh preflight` reports the batch fits.
 #
 # Derived from `./run_pipeline.sh audit`, which found 1 blocker and 5 warnings
-# on the original. Items that could NOT be fixed in config alone are listed
+# on the original. Two items could NOT be fixed in config alone and are listed
 # under "CODE CHANGES STILL REQUIRED" at the bottom.
 
 model:
@@ -31,17 +33,7 @@ model:
     lora_r: 32
     lora_dropout: 0.1
     _target_: simlingo_training.models.language_model.llm.LLM
-  # CHANGED  3.0e-05 -> 1.2e-05
-  # 3e-5 is SimLingo's value at effective batch 48. This config runs at effective
-  # batch 8 (4 x 2 GPUs), so the same lr is a materially different optimisation.
-  # 1.2e-5 is the square-root scaling rule, 3e-5 * sqrt(8/48); the linear rule
-  # would give 5e-6, which over only 15 epochs risks underfitting. sqrt scaling
-  # is the usual choice for Adam-family optimisers.
-  #
-  # If you apply trainer_accumulation.patch and set accumulation to restore
-  # effective batch 48, put this BACK to 3.0e-05 -- the adjustment exists only
-  # to compensate for the smaller batch.
-  lr: 1.2e-05
+  lr: 3.0e-05
   weight_decay: 0.1
   betas:
   - 0.9
@@ -103,18 +95,17 @@ data_module:
     _target_: simlingo_training.dataloader.dataset_eval_qa_comm.Data_Eval
   insteval_dataset:
     _target_: simlingo_training.dataloader.dataset_eval_dreamer.Eval_Dreamer
-  # UNCHANGED at 4 (4 x 2 GPUs = effective batch 8).
+  # CHANGED  4 -> 24
+  # 4 x 2 GPUs = effective 8, against an lr of 3e-5 that SimLingo tuned at
+  # effective batch 48 -- roughly 6x the gradient noise per step, so the same lr
+  # is a different optimisation and a delta against SimLingo would be confounded
+  # by batch size rather than architecture. 24 x 2 GPUs restores exactly 48.
   #
-  # This is below the effective batch 48 that SimLingo's lr of 3e-5 was tuned
-  # at -- roughly 6x the gradient noise per step -- so the LEARNING RATE below
-  # is adjusted to compensate. See the `lr` comment in the model block.
-  #
-  # Gradient accumulation would be the better fix, since it restores batch 48 at
-  # no extra memory. It needs a one-line change to train.py, which does NOT
-  # currently forward it: Trainer(...) is constructed without
-  # accumulate_grad_batches, so adding the key to this file alone would be
-  # silently ignored. See trainer_accumulation.patch.
-  batch_size: 4
+  # If 24 does not fit, halve it and compensate. Check FIRST that train.py
+  # actually forwards accumulate_grad_batches to the Lightning Trainer -- it is
+  # not in SimLingo's TrainConfig, and an ignored key leaves you at batch 24, not
+  # 48. If it is not forwarded, use batch_size 12 and scale lr to 1.5e-5 instead.
+  batch_size: 24
   # CHANGED  0 -> 8
   # THE BLOCKER. With num_workers=0 the dataloader runs inside the training
   # process, so every cv2.imread plus two resizes at 1024x512 blocks the step --
@@ -168,7 +159,7 @@ fp16_loss_scale: null
 enable_wandb: false
 wandb_project: simlingo
 # CHANGED  name reflects the tuned settings so runs are not confused
-name: carlavla_v3_diffusion_bf16_b4_cot60_15ep
+name: carlavla_v3_diffusion_bf16_b48_cot60_15ep
 wandb_name: 2026_08_29_diffusion_tuned
 # CHANGED  10 -> 15, per the stated 15-epoch fine-tuning schedule.
 max_epochs: 15
@@ -189,12 +180,6 @@ checkpoint_every_n_steps: 2500
 # =====================================================================
 # CODE CHANGES STILL REQUIRED (cannot be expressed in this config)
 # =====================================================================
-# 0. train.py does not forward accumulate_grad_batches to the Lightning
-#    Trainer (it is constructed with accelerator/devices/precision/strategy/
-#    max_epochs/... but not accumulation). Without the one-line change in
-#    trainer_accumulation.patch, the effective batch is fixed at
-#    batch_size x gpus and the lr above compensates for it.
-#
 # 1. diffusion_decoder.py uses epsilon-prediction. Measured on a controlled
 #    overfit at your diffusion_infer_steps=10:
 #        epsilon        2.607 m mean absolute waypoint error

@@ -90,22 +90,39 @@ def audit(cfg: dict) -> list[Finding]:
     # ---- effective batch vs learning rate
     eff = int(t["batch_size"]) * int(t.get("accumulate_grad_batches", 1)) * devices
     lr = float(t["lr"])
-    if eff != SIMLINGO_EFFECTIVE_BATCH:
-        ratio = SIMLINGO_EFFECTIVE_BATCH / max(eff, 1)
-        f.append(Finding(
-            "WARNING",
-            f"Effective batch {eff} != SimLingo's {SIMLINGO_EFFECTIVE_BATCH}",
-            f"lr={lr:g} is the value SimLingo tuned at batch "
-            f"{SIMLINGO_EFFECTIVE_BATCH}. At batch {eff} the gradient noise is "
-            f"about {ratio:.1f}x larger per step, so the same lr is no longer the "
-            "same optimisation, and a benchmark delta against SimLingo would be "
-            "confounded by batch size rather than architecture.",
-            f"Either raise accumulate_grad_batches to "
-            f"{max(1, round(SIMLINGO_EFFECTIVE_BATCH / max(int(t['batch_size']) * devices, 1)))} "
-            f"to restore batch {SIMLINGO_EFFECTIVE_BATCH}, or scale lr toward "
-            f"{lr / ratio:.2g} (linear rule) and say so when reporting."))
+    if eff == SIMLINGO_EFFECTIVE_BATCH:
+        f.append(Finding("OK", f"Effective batch {eff} matches SimLingo "
+                               f"(lr {lr:g})", "", ""))
     else:
-        f.append(Finding("OK", f"Effective batch {eff} matches SimLingo", "", ""))
+        # A smaller batch is fine PROVIDED the lr was scaled for it. Flagging
+        # every batch != 48 regardless of lr would train people to ignore this.
+        ratio = SIMLINGO_EFFECTIVE_BATCH / max(eff, 1)
+        linear = SIMLINGO_LR / ratio
+        sqrt_scaled = SIMLINGO_LR / (ratio ** 0.5)
+        lo, hi = sorted((linear, sqrt_scaled))
+        if lo * 0.8 <= lr <= hi * 1.25:
+            rule = "sqrt" if abs(lr - sqrt_scaled) < abs(lr - linear) else "linear"
+            f.append(Finding(
+                "OK",
+                f"Effective batch {eff} with lr {lr:g} compensated ({rule} rule)",
+                f"Smaller than SimLingo's {SIMLINGO_EFFECTIVE_BATCH}, but the lr "
+                f"was scaled to match, so this is a deliberate trade rather than "
+                f"an uncompensated mismatch. State the batch alongside any "
+                f"comparison against SimLingo.", ""))
+        else:
+            f.append(Finding(
+                "WARNING",
+                f"Effective batch {eff} != SimLingo's {SIMLINGO_EFFECTIVE_BATCH}, "
+                f"and lr {lr:g} is not scaled for it",
+                f"lr={lr:g} is SimLingo's value for batch "
+                f"{SIMLINGO_EFFECTIVE_BATCH}. At batch {eff} the gradient noise is "
+                f"about {ratio:.1f}x larger per step, so the same lr is a "
+                f"different optimisation and a delta against SimLingo would be "
+                f"confounded by batch size rather than architecture.",
+                f"Either restore batch {SIMLINGO_EFFECTIVE_BATCH} via gradient "
+                f"accumulation (needs a one-line change to train.py, which does "
+                f"not currently forward it), or set lr between {lo:.2g} (linear) "
+                f"and {hi:.2g} (sqrt) and say so when reporting."))
 
     # ---- precision
     prec = str(t.get("precision", ""))

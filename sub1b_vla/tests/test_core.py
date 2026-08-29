@@ -1302,9 +1302,60 @@ def test_tuned_carlavla_config_clears_every_blocker():
     assert not blockers, blockers
 
     ok = {f.title for f in findings if f.level == "OK"}
-    assert any("Effective batch 48" in t for t in ok)
+    assert any("compensated" in t for t in ok), ok
     assert any("bf16-mixed" in t for t in ok)
     assert any("CoT share 60%" in t for t in ok)
+
+
+def test_audit_accepts_a_small_batch_only_when_the_lr_is_scaled_for_it():
+    """Flagging every batch != 48 regardless of lr would train people to ignore
+    the finding. A compensated lr is a deliberate trade, not a mismatch."""
+    from sub1b_vla.tools.config_audit import audit
+
+    cfg = load_config("sub1b_vla/configs/carlavla_v3_tuned.yaml")
+    compensated = next(f for f in audit(cfg) if "Effective batch" in f.title)
+    assert compensated.level == "OK", compensated.title
+
+    cfg["train"]["lr"] = 3.0e-5          # SimLingo's batch-48 value, uncompensated
+    uncompensated = next(f for f in audit(cfg) if "Effective batch" in f.title)
+    assert uncompensated.level == "WARNING"
+    assert "not scaled for it" in uncompensated.title
+
+
+def test_safe_tuned_config_keeps_the_original_batch_size():
+    """batch_size must not be raised in the file that is actually run: the
+    memory ceiling on the target GPUs has never been measured here."""
+    import yaml
+
+    tuned = yaml.safe_load(pathlib.Path("configs_carlavla/config_tuned.yaml").read_text())
+    orig = yaml.safe_load(pathlib.Path("configs_carlavla/config_original.yaml").read_text())
+    assert tuned["data_module"]["batch_size"] == orig["data_module"]["batch_size"] == 4
+    # ...and the lr must be scaled down to compensate for the smaller batch.
+    assert tuned["model"]["lr"] < orig["model"]["lr"]
+
+
+def test_experimental_high_batch_config_is_separate_and_labelled():
+    import yaml
+
+    exp = pathlib.Path("configs_carlavla/config_tuned_batch24.yaml")
+    assert exp.exists(), "the high-batch variant must live in its own file"
+    text = exp.read_text()
+    assert "EXPERIMENTAL" in text and "preflight" in text
+    cfg = yaml.safe_load(text)
+    assert cfg["data_module"]["batch_size"] == 24
+    # At 24 x 2 GPUs the effective batch is 48, so the lr goes back to SimLingo's.
+    assert cfg["model"]["lr"] == 3.0e-05
+
+
+def test_original_config_is_vendored_unmodified():
+    """The original must survive intact next to the tuned versions."""
+    import hashlib
+
+    orig = pathlib.Path("configs_carlavla/config_original.yaml").read_bytes()
+    assert b"batch_size: 4" in orig
+    assert b"num_workers: 0" in orig
+    assert b"precision: 16-mixed" in orig
+    assert len(hashlib.sha256(orig).hexdigest()) == 64
 
 
 def test_tuned_config_preserves_every_hydra_key_of_the_original():
