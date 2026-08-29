@@ -1109,3 +1109,75 @@ def test_effective_batch_matches_simlingo_in_every_gpu_config():
         t = load_config(f"sub1b_vla/configs/{name}.yaml")["train"]
         eff = t["batch_size"] * t["accumulate_grad_batches"]
         assert eff == 48, f"{name}: effective batch {eff} != 48"
+
+
+# ------------------------------------------------------------- attention
+def test_sdpa_attention_matches_its_explicit_path():
+    """The fused path and the weight-returning path must agree, or the HUD's
+    attention map would describe different maths from the one that ran."""
+    from sub1b_vla.models.attention import SDPAAttention
+
+    torch.manual_seed(0)
+    attn = SDPAAttention(64, 8).eval()
+    q, kv = torch.randn(2, 10, 64), torch.randn(2, 17, 64)
+    fused, w_none = attn(q, kv, kv)
+    explicit, weights = attn(q, kv, kv, need_weights=True)
+    assert w_none is None, "the fused path must not materialise weights"
+    assert weights.shape == (2, 10, 17)
+    assert torch.allclose(fused, explicit, atol=1e-5)
+
+
+def test_sdpa_attention_has_the_same_parameter_count_as_nn_mha():
+    """Swapping the module must not move the <1B budget."""
+    from sub1b_vla.models.attention import SDPAAttention
+
+    d, h = 128, 8
+    mine = sum(p.numel() for p in SDPAAttention(d, h).parameters())
+    ref = sum(p.numel() for p in torch.nn.MultiheadAttention(d, h, batch_first=True).parameters())
+    assert mine == ref, (mine, ref)
+
+
+def test_sdpa_attention_rejects_indivisible_head_split():
+    from sub1b_vla.models.attention import SDPAAttention
+
+    with pytest.raises(ValueError, match="not divisible"):
+        SDPAAttention(65, 8)
+
+
+def test_causal_masking_is_applied_on_both_paths():
+    from sub1b_vla.models.attention import SDPAAttention
+
+    torch.manual_seed(1)
+    attn = SDPAAttention(32, 4).eval()
+    x = torch.randn(1, 6, 32)
+    fused, _ = attn(x, x, x, is_causal=True)
+    explicit, w = attn(x, x, x, is_causal=True, need_weights=True)
+    assert torch.allclose(fused, explicit, atol=1e-5)
+    # Upper triangle must carry no attention mass.
+    assert float(w[0].triu(1).abs().sum()) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_attention_backend_report_states_what_ran_not_what_is_installed():
+    from sub1b_vla.models.attention import attention_backend_report
+
+    rep = attention_backend_report(torch.device("cpu"))
+    assert "sdpa" in rep and "flash_attn_package" in rep
+    assert rep["sdpa"]["device"] == "cpu"
+    assert "note" in rep["sdpa"], "a CPU device must say flash is unavailable"
+
+
+def test_attn_implementation_fallback_chain_order():
+    from sub1b_vla.models.backbones import ATTN_FALLBACK_CHAIN, _load_hf
+
+    assert ATTN_FALLBACK_CHAIN[0] == "flash_attention_2"
+    tried = []
+
+    def loader(model_id, attn_implementation=None, **kw):
+        tried.append(attn_implementation)
+        if attn_implementation != "eager":
+            raise ValueError(f"{attn_implementation} unsupported")
+        return "loaded"
+
+    model, impl = _load_hf(loader, "some/model", "flash_attention_2")
+    assert model == "loaded" and impl == "eager"
+    assert tried == ["flash_attention_2", "sdpa", "eager"], tried

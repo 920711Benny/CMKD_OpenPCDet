@@ -343,6 +343,47 @@ pip install -r requirements.txt
 Set `SUB1B_SCRATCH` to a high-capacity directory; `HF_HOME`, `TORCH_HOME` and the
 dataset caches are redirected under it automatically.
 
+### FlashAttention-2 on RTX 6000 Pro / Ubuntu 24.04
+
+Two separate things are called "flash attention", and they fail differently:
+
+| | what it is | how this repo uses it |
+|---|---|---|
+| **flash-attn package** | standalone CUDA kernels | `attn_implementation: flash_attention_2` on the HuggingFace backbones |
+| **PyTorch SDPA flash backend** | built into torch | every attention module in this repo, via `F.scaled_dot_product_attention` |
+
+**`nn.MultiheadAttention` never reaches either.** Its fused path is a separate
+native kernel with its own conditions and it falls back to unfused math whenever
+they are not met — `need_weights=True` being the usual culprit. A model built
+from `nn.MultiheadAttention` gets no benefit from an installed flash-attn, no
+matter how carefully it was compiled. Every attention here therefore goes
+through `models/attention.py::SDPAAttention`, which dispatches via SDPA and has
+**identical parameter count** to `nn.MultiheadAttention` (a test pins this, so
+the <1B budget cannot move).
+
+Attention weights are still needed for the HUD's attention maps, so that path
+exists — but explicitly and separately, because materialising the weight matrix
+is exactly what disables the flash kernel. Training uses the fused path.
+
+Install (Blackwell is sm_120 and needs a CUDA 12.8+ toolchain):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+MAX_JOBS=4 pip install flash-attn --no-build-isolation   # ~30-60 min from source
+./run_pipeline.sh preflight                              # verify it is ACTUALLY used
+```
+
+**Verify rather than assume.** flash-attn wheels have historically targeted
+sm80–sm90; one built for the wrong architecture imports cleanly and is then
+never used. `gpu_preflight` probes each SDPA backend *by running it* and reports
+what executed, warns when the flash backend is unusable, and prints which
+implementation each backbone actually loaded — the loader walks
+`flash_attention_2 → sdpa → eager` and records the winner, so a mismatch
+degrades visibly instead of silently costing throughput.
+
+FlashAttention needs bf16/fp16 inputs; fp32 falls back to the math backend
+silently. The `bf16-mixed` default satisfies this.
+
 ### GPU settings
 
 | setting | default | why |

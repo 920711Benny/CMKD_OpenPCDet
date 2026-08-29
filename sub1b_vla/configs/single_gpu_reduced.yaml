@@ -36,6 +36,11 @@ model:
   spatial_model: facebook/dinov2-small        # geometry / depth / affordance
   semantic_model: google/siglip-base-patch16-224   # global semantics for the LLM
   freeze: true                    # both vision backbones frozen
+  # FlashAttention-2 for the HuggingFace backbones. The loader walks
+  # flash_attention_2 -> sdpa -> eager and REPORTS which one actually loaded,
+  # so a mismatched flash-attn build degrades instead of silently costing speed.
+  # Requires bf16/fp16 (satisfied by the bf16 autocast) and a CUDA device.
+  attn_implementation: flash_attention_2
   allow_stub: true                # fall back to random ViT if weights unavailable
   embed_dim: 896                  # == Qwen2-0.5B hidden size
   spatial_dim: 256

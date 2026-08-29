@@ -73,6 +73,7 @@ class DualHeadDiffusionVLA(nn.Module):
             image_size=m["image_size"],
             freeze=m.get("freeze", True),
             allow_stub=m.get("allow_stub", True),
+            attn_implementation=m.get("attn_implementation", "flash_attention_2"),
         )
         self.language = CoCLanguageModel(
             model_id=m["language_model"],
@@ -83,6 +84,7 @@ class DualHeadDiffusionVLA(nn.Module):
             lora_targets=m.get("lora_targets"),
             allow_stub=m.get("allow_stub", True),
             use_language_tower_only=m.get("use_language_tower_only", True),
+            attn_implementation=m.get("attn_implementation", "flash_attention_2"),
         )
         self.diffusion = CoCDiffusionHead(
             spatial_dim=m["spatial_dim"],

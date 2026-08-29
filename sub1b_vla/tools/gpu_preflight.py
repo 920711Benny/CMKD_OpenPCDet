@@ -133,8 +133,26 @@ def main():
         problems.append("bf16-mixed requested but unsupported here; it silently fell "
                         "back to fp32, which will roughly halve throughput.")
 
+    from ..models.attention import attention_backend_report  # noqa: PLC0415
+
+    attn = attention_backend_report(device)
+    print("-" * w)
+    print(f"{'flash-attn package':<26}{attn['flash_attn_package']}")
+    for name, state in attn["sdpa"].get("backends", {}).items():
+        print(f"{'sdpa backend ' + name:<26}{state}")
+    if device.type == "cuda" and not attn["sdpa"].get("flash_available"):
+        warnings_.append(
+            "The SDPA flash backend is NOT usable on this device/dtype. Attention "
+            "will run on the memory-efficient or math kernel; expect a slower run.")
+    if device.type == "cuda" and not attn["flash_attn_package"]["installed"]:
+        warnings_.append(
+            "flash-attn is not installed, so attn_implementation='flash_attention_2' "
+            "will fall back to sdpa for the HuggingFace backbones.")
+
     model = DualHeadDiffusionVLA(cfg).to(device)
     rep = model.assert_parameter_budget()
+    print(f"{'LM attn implementation':<26}{model.language.attn_implementation}")
+    print(f"{'vision attn impl':<26}{model.encoder.spatial_spec.attn_implementation}")
     print(f"{'total params':<26}{rep.total:,} ({rep.total / 1e9:.3f} B)")
     print(f"{'trainable params':<26}{rep.trainable:,} ({rep.trainable / 1e6:.1f} M)")
     if model.encoder.spatial_spec.is_stub or model.language.is_stub:
@@ -215,6 +233,7 @@ def main():
         Path(args.json_out).write_text(json.dumps(
             {"hardware": hw, "throughput_samples_per_s": sps, "batch": bs,
              "max_batch": max_bs, "peak_memory_gb": peak, "projection": projection,
+             "attention": attn,
              "warnings": warnings_, "blockers": problems}, indent=2, default=str))
     raise SystemExit(0 if not problems else 1)
 

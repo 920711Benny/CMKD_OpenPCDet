@@ -22,6 +22,7 @@ class BackboneSpec:
     patch: int
     image_size: int
     is_stub: bool = False
+    attn_implementation: str = "n/a"
 
     @property
     def num_patches(self) -> int:
@@ -70,14 +71,40 @@ _KNOWN = {
 }
 
 
-def build_vision_backbone(model_id: str, image_size: int, allow_stub: bool = True):
+ATTN_FALLBACK_CHAIN = ("flash_attention_2", "sdpa", "eager")
+
+
+def _load_hf(loader, model_id: str, attn_implementation: str | None, **kw):
+    """Load a HF model, walking down the attention-implementation chain.
+
+    FlashAttention-2 is requested first and the chain is walked on failure, so a
+    missing or mismatched flash-attn build degrades to sdpa instead of killing
+    the run. The implementation that actually loaded is returned, because
+    assuming flash when it silently fell back is how a run ends up slow for
+    reasons nobody can see.
+    """
+    chain = (ATTN_FALLBACK_CHAIN if attn_implementation in (None, "auto")
+             else (attn_implementation,) + tuple(
+                 a for a in ATTN_FALLBACK_CHAIN if a != attn_implementation))
+    last: Exception | None = None
+    for impl in chain:
+        try:
+            return loader(model_id, attn_implementation=impl, **kw), impl
+        except Exception as exc:  # noqa: BLE001 - unsupported impl raises various types
+            last = exc
+    raise last if last else RuntimeError(f"could not load {model_id}")
+
+
+def build_vision_backbone(model_id: str, image_size: int, allow_stub: bool = True,
+                          attn_implementation: str | None = "flash_attention_2"):
     """Return (module, BackboneSpec). Module output: (B, N_patches, hidden)."""
     hidden, patch, native = _KNOWN.get(model_id, (384, 14, 224))
     spec = BackboneSpec(model_id, hidden, patch, image_size)
     try:
         from transformers import AutoModel  # noqa: PLC0415
 
-        model = AutoModel.from_pretrained(model_id)
+        model, impl = _load_hf(AutoModel.from_pretrained, model_id, attn_implementation)
+        spec.attn_implementation = impl
         if hasattr(model, "vision_model"):  # SigLIP / CLIP style wrapper
             model = model.vision_model
         cfg = getattr(model, "config", None)

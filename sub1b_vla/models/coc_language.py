@@ -102,12 +102,14 @@ class CoCLanguageModel(nn.Module):
         lora_targets: tuple[str, ...] | None = None,
         allow_stub: bool = True,
         use_language_tower_only: bool = True,
+        attn_implementation: str | None = "flash_attention_2",
     ):
         super().__init__()
         self.model_id = model_id
         self.is_stub = False
+        self.attn_implementation = "n/a"
         self.backbone, self.hidden_size, self.tokenizer = self._build(
-            model_id, embed_dim, allow_stub, use_language_tower_only
+            model_id, embed_dim, allow_stub, use_language_tower_only, attn_implementation
         )
         targets = tuple(lora_targets) if lora_targets else DEFAULT_LORA_TARGETS
         n = inject_lora(
@@ -132,17 +134,23 @@ class CoCLanguageModel(nn.Module):
             nn.Linear(self.hidden_size // 2, len(INTENTS)),
         )
 
-    def _build(self, model_id, embed_dim, allow_stub, tower_only):
+    def _build(self, model_id, embed_dim, allow_stub, tower_only, attn_implementation=None):
         """Load the LM. `tower_only` keeps InternVL's language decoder and drops
         its native InternViT tower -- our dual-head encoder replaces it, and
         dropping it is what keeps the total under the 1B parameter budget."""
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: PLC0415
 
+            from .backbones import _load_hf  # noqa: PLC0415
+
             tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id, trust_remote_code=True, torch_dtype=torch.float32
+            # FlashAttention-2 matters most here: the decoder is the deepest
+            # stack and the only autoregressive one.
+            model, impl = _load_hf(
+                AutoModelForCausalLM.from_pretrained, model_id, attn_implementation,
+                trust_remote_code=True, torch_dtype=torch.float32,
             )
+            self.attn_implementation = impl
             if tower_only:
                 for attr in ("language_model", "llm", "text_model"):
                     if hasattr(model, attr):

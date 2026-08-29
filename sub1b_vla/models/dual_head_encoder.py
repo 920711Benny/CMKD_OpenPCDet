@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
+from .attention import SDPAAttention
 from .backbones import build_vision_backbone
 
 
@@ -48,7 +49,7 @@ class TokenCompressor(nn.Module):
         super().__init__()
         self.queries = nn.Parameter(torch.randn(1, num_queries, out_dim) * 0.02)
         self.kv_proj = nn.Linear(in_dim, out_dim)
-        self.attn = nn.MultiheadAttention(out_dim, num_heads, batch_first=True)
+        self.attn = SDPAAttention(out_dim, num_heads)
         self.norm_q = nn.LayerNorm(out_dim)
         self.norm_kv = nn.LayerNorm(out_dim)
         self.ffn = nn.Sequential(
@@ -62,7 +63,12 @@ class TokenCompressor(nn.Module):
         b = x.shape[0]
         kv = self.norm_kv(self.kv_proj(x))
         q = self.norm_q(self.queries.expand(b, -1, -1))
-        out, attn_w = self.attn(q, kv, kv, need_weights=True, average_attn_weights=True)
+        # The HUD needs per-patch attention mass, which forces the explicit
+        # path -- materialising the weights is what disables the flash kernel.
+        # Training does not need them, so the fused path is used there.
+        out, attn_w = self.attn(q, kv, kv, need_weights=not self.training)
+        if attn_w is None:
+            attn_w = x.new_zeros(x.shape[0], x.shape[1])
         tokens = out + q
         tokens = tokens + self.ffn(tokens)
         return tokens, attn_w.mean(dim=1)  # (B, N_src)
@@ -99,13 +105,14 @@ class DualHeadAsymmetricEncoder(nn.Module):
         image_size: int = 224,
         freeze: bool = True,
         allow_stub: bool = True,
+        attn_implementation: str | None = "flash_attention_2",
     ):
         super().__init__()
         self.spatial_backbone, self.spatial_spec = build_vision_backbone(
-            spatial_model, image_size, allow_stub
+            spatial_model, image_size, allow_stub, attn_implementation
         )
         self.semantic_backbone, self.semantic_spec = build_vision_backbone(
-            semantic_model, image_size, allow_stub
+            semantic_model, image_size, allow_stub, attn_implementation
         )
         self.frozen = freeze
         if freeze:
@@ -123,7 +130,7 @@ class DualHeadAsymmetricEncoder(nn.Module):
         # Asymmetric cross-talk: geometry informs semantics (a stopped car ahead
         # is a *geometric* fact that must reach the rationale), but we do not let
         # the coarse semantic stream blur the dense geometric one.
-        self.geo_to_sem = nn.MultiheadAttention(embed_dim, 8, batch_first=True)
+        self.geo_to_sem = SDPAAttention(embed_dim, 8)
         self.geo_kv = nn.Linear(spatial_dim, embed_dim)
         self.sem_norm = nn.LayerNorm(embed_dim)
         self.embed_dim = embed_dim
@@ -149,7 +156,7 @@ class DualHeadAsymmetricEncoder(nn.Module):
         semantic_tokens, semantic_attn = self.semantic_compress(semantic_raw)
 
         kv = self.geo_kv(spatial_tokens)
-        cross, _ = self.geo_to_sem(semantic_tokens, kv, kv, need_weights=False)
+        cross, _ = self.geo_to_sem(semantic_tokens, kv, kv)
         semantic_tokens = self.sem_norm(semantic_tokens + cross)
 
         return DualHeadOutput(

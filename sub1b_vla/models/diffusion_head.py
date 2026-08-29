@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .attention import SDPAAttention
+
 
 def cosine_alpha_bar(t: torch.Tensor, s: float = 0.008) -> torch.Tensor:
     return torch.cos((t + s) / (1.0 + s) * math.pi / 2).pow(2)
@@ -103,26 +105,26 @@ class DenoiserBlock(nn.Module):
     def __init__(self, dim: int, spatial_dim: int, sem_dim: int, heads: int = 8):
         super().__init__()
         self.n1 = nn.LayerNorm(dim)
-        self.self_attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.self_attn = SDPAAttention(dim, heads)
         self.n2 = nn.LayerNorm(dim)
         self.geo_kv = nn.Linear(spatial_dim, dim)
-        self.geo_attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.geo_attn = SDPAAttention(dim, heads)
         self.n3 = nn.LayerNorm(dim)
         self.sem_kv = nn.Linear(sem_dim, dim)
-        self.sem_attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.sem_attn = SDPAAttention(dim, heads)
         self.n4 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim))
         self.film = nn.Linear(dim, dim * 2)
 
     def forward(self, x, geo, sem, cond):
         h = self.n1(x)
-        x = x + self.self_attn(h, h, h, need_weights=False)[0]
+        x = x + self.self_attn(h, h, h)[0]
         h = self.n2(x)
         gk = self.geo_kv(geo)
-        x = x + self.geo_attn(h, gk, gk, need_weights=False)[0]
+        x = x + self.geo_attn(h, gk, gk)[0]
         h = self.n3(x)
         sk = self.sem_kv(sem)
-        x = x + self.sem_attn(h, sk, sk, need_weights=False)[0]
+        x = x + self.sem_attn(h, sk, sk)[0]
         scale, shift = self.film(cond).unsqueeze(1).chunk(2, dim=-1)
         x = x + self.ffn(self.n4(x) * (1 + scale) + shift)
         return x
