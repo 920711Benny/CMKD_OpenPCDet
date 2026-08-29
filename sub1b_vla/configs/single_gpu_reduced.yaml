@@ -138,8 +138,19 @@ train:
   precision: bf16-mixed
   strategy: auto
   devices: 1
-  batch_size: 12                  # larger micro-batch: frozen backbones free memory
-  accumulate_grad_batches: 4      # -> effective batch 48, still == SimLingo's
+  # GPU accelerations. TF32 and cuDNN autotuning are safe here: the input shape
+  # is fixed for a whole run, and the model already trains under bf16 autocast,
+  # so TF32 is not the limiting numerical factor.
+  allow_tf32: true
+  cudnn_benchmark: true
+  # torch.compile is OFF by default: it costs minutes of warmup and a failure
+  # part-way into a multi-hour run is expensive. Turn it on ("default" or
+  # "max-autotune") once a short run has proven the model trains.
+  compile: null
+  # Only needed if gpu_preflight reports the configured batch does not fit.
+  gradient_checkpointing: false
+  batch_size: 24                  # frozen backbones free the activation memory
+  accumulate_grad_batches: 2      # -> effective batch 48, still == SimLingo's
   num_workers: 8
   # Epoch-based like SimLingo (max_epochs: 15). max_steps caps a run when you
   # want a fixed budget; set it to 0 to run purely by epochs.

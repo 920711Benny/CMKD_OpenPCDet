@@ -125,6 +125,74 @@ def setup_scratch_dirs(cfg: dict | None = None) -> dict:
     return {"scratch": str(root)}
 
 
+def setup_device(cfg: dict | None = None):
+    """Select the device and turn on the accelerations that are safe by default.
+
+    Returns (device, info dict). Everything here is a no-op on CPU, so the same
+    call is correct in both places.
+
+    * TF32 matmul/conv: large speedup on Ampere and later at bf16-comparable
+      precision. Safe for this model -- the diffusion head is trained in
+      bf16 autocast anyway, so TF32 is not the limiting numerical factor.
+    * cuDNN benchmark: the input shape is fixed for a whole run, so autotuning
+      pays for itself immediately.
+    * `high` matmul precision: opts into TF32 for torch.matmul specifically.
+    """
+    import torch  # noqa: PLC0415
+
+    t = (cfg or {}).get("train", {})
+    if not torch.cuda.is_available():
+        threads = int(t.get("cpu_threads", 0) or 0)
+        if threads > 0:
+            torch.set_num_threads(threads)
+        return torch.device("cpu"), {
+            "device": "cpu",
+            "warning": "no CUDA device visible; training on CPU is far slower",
+            "threads": torch.get_num_threads(),
+        }
+
+    device = torch.device("cuda")
+    allow_tf32 = bool(t.get("allow_tf32", True))
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+    torch.backends.cudnn.allow_tf32 = allow_tf32
+    torch.backends.cudnn.benchmark = bool(t.get("cudnn_benchmark", True))
+    if allow_tf32:
+        torch.set_float32_matmul_precision("high")
+
+    props = torch.cuda.get_device_properties(0)
+    return device, {
+        "device": "cuda",
+        "name": props.name,
+        "capability": f"{props.major}.{props.minor}",
+        "total_memory_gb": round(props.total_memory / 1024 ** 3, 1),
+        "multi_processor_count": props.multi_processor_count,
+        "bf16_supported": torch.cuda.is_bf16_supported(),
+        "tf32": allow_tf32,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+    }
+
+
+def maybe_compile(model, cfg: dict):
+    """Optionally torch.compile the model.
+
+    Off by default: compilation costs minutes of warmup and can fail on dynamic
+    shapes, and a failure part-way into a multi-hour run is expensive. Enable
+    with train.compile once a short run has proven the model works.
+    """
+    import torch  # noqa: PLC0415
+
+    mode = cfg.get("train", {}).get("compile")
+    if not mode:
+        return model, "off"
+    try:
+        compiled = torch.compile(model, mode=mode if isinstance(mode, str) else "default")
+        return compiled, f"on ({mode})"
+    except Exception as exc:  # noqa: BLE001
+        print(f"[compile] torch.compile failed ({type(exc).__name__}: {exc}); "
+              "continuing uncompiled.")
+        return model, "failed"
+
+
 def human(n: int) -> str:
     for unit in ("", "K", "M", "B"):
         if abs(n) < 1000:

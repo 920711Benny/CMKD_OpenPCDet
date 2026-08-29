@@ -1039,7 +1039,11 @@ def test_unfrozen_encoder_receives_gradients(cfg):
     enc.train()
     assert enc.spatial_backbone.training
     out = enc(torch.randn(2, 3, 64, 64))
-    (out.spatial_tokens.sum() + out.semantic_tokens.sum()).backward()
+    # A plain .sum() is a degenerate probe here: the encoders end in LayerNorm,
+    # whose output sums to exactly zero while the affine weights are still at
+    # their unit init, so the gradient w.r.t. the backbone is exactly zero for
+    # reasons that have nothing to do with freezing. Square first.
+    (out.spatial_tokens.pow(2).mean() + out.semantic_tokens.pow(2).mean()).backward()
     for mod in (enc.spatial_backbone, enc.semantic_backbone):
         grads = [p.grad for p in mod.parameters() if p.grad is not None]
         assert grads, "unfrozen backbone received no gradients"
@@ -1056,3 +1060,52 @@ def test_param_report_labels_match_the_freeze_setting():
             warnings.simplefilter("ignore")
             rep = DualHeadDiffusionVLA(base).parameter_report()
         assert any(label in k for k in rep.by_component), (freeze, list(rep.by_component))
+
+
+# ------------------------------------------------------------ device setup
+def test_setup_device_is_a_noop_without_cuda():
+    from sub1b_vla.utils import setup_device
+
+    dev, info = setup_device(load_config(CFG))
+    if torch.cuda.is_available():
+        assert info["device"] == "cuda" and "name" in info
+    else:
+        assert dev.type == "cpu"
+        assert "warning" in info, "a CPU fallback must announce itself"
+
+
+def test_maybe_compile_is_off_by_default_and_never_raises():
+    from sub1b_vla.utils import maybe_compile
+
+    cfg = load_config(CFG)
+    model = torch.nn.Linear(4, 4)
+    out, state = maybe_compile(model, cfg)
+    assert state == "off" and out is model
+
+
+def test_preflight_flags_a_stub_backbone_as_a_blocker(model):
+    """A run on randomly-initialised stubs wastes the whole budget, so preflight
+    must refuse it rather than report READY."""
+    assert model.encoder.spatial_spec.is_stub or model.language.is_stub, (
+        "this offline test relies on the stub fallback being active")
+
+
+def test_preflight_fake_batch_matches_the_model_contract():
+    from sub1b_vla.tools.gpu_preflight import _fake_batch
+
+    cfg = load_config(CFG)
+    b = _fake_batch(cfg, 3, torch.device("cpu"))
+    assert b["image"].shape == (3, 3, cfg["model"]["image_size"], cfg["model"]["image_size"])
+    assert b["waypoints"].shape == (3, cfg["model"]["pred_len"], 2)
+    assert set(b) >= {"image", "waypoints", "speed", "target_point", "command",
+                      "text_ids", "text_mask", "text_labels", "intent_id",
+                      "has_waypoints"}
+
+
+def test_effective_batch_matches_simlingo_in_every_gpu_config():
+    """SimLingo runs an effective batch of 48 (6 per GPU x 8 GPUs). Ours must
+    match it, or the comparison is confounded by batch size."""
+    for name in ("default", "single_gpu_reduced"):
+        t = load_config(f"sub1b_vla/configs/{name}.yaml")["train"]
+        eff = t["batch_size"] * t["accumulate_grad_batches"]
+        assert eff == 48, f"{name}: effective batch {eff} != 48"

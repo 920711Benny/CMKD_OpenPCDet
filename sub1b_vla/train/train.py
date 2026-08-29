@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 
 from ..data.dataset import DrivingVLADataset, collate
 from ..models.vla_agent import DualHeadDiffusionVLA
-from ..utils import load_config, setup_scratch_dirs
+from ..utils import load_config, maybe_compile, setup_device, setup_scratch_dirs
 
 
 def set_seed(seed: int):
@@ -136,13 +136,21 @@ def forward_backward(model, batch, step, accum, device, use_amp, amp_dtype,
 def train(cfg, config_path: str):
     setup_scratch_dirs(cfg)
     set_seed(cfg.get("seed", 0))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device, hw = setup_device(cfg)
+    print(f"[device] {json.dumps(hw)}", flush=True)
+    if hw["device"] == "cpu":
+        print("[device] WARNING: no GPU visible. This model is meant to be trained "
+              "on a CUDA device; CPU training is orders of magnitude slower.", flush=True)
     t = cfg["train"]
     out_dir = Path(t["out_dir"]) / cfg["experiment"]
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model = DualHeadDiffusionVLA(cfg).to(device)
     report = model.assert_parameter_budget()
+    if t.get("gradient_checkpointing") and hasattr(model.language.backbone,
+                                                   "gradient_checkpointing_enable"):
+        model.language.backbone.gradient_checkpointing_enable()
+        print("[memory] gradient checkpointing enabled on the language backbone.")
     print(report, flush=True)
     (out_dir / "param_report.txt").write_text(str(report))
 
@@ -158,6 +166,8 @@ def train(cfg, config_path: str):
     betas = tuple(t.get("betas", (0.9, 0.999)))
     opt = torch.optim.AdamW(params, lr=t["lr"], weight_decay=t["weight_decay"], betas=betas)
     use_amp, amp_dtype = resolve_amp(t.get("precision", "bf16-mixed"), device)
+    model, compile_state = maybe_compile(model, cfg)
+    print(f"[compile] {compile_state}", flush=True)
 
     accum = t.get("accumulate_grad_batches", 1)
     steps_per_epoch = max(1, len(loader))

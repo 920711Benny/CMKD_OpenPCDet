@@ -308,12 +308,22 @@ a slightly stale HUD line (with its frame age), not as a stalled vehicle.
 
 ## 3. Running it
 
+**Training is a GPU workflow.** There is no supported CPU training path: on a
+single RTX PRO 6000 the reduced recipe is ~14 h, and the same work on CPU is
+orders of magnitude slower. `gpu_preflight` refuses to report READY without a
+CUDA device.
+
 ```bash
 pip install -r requirements.txt
 
 # 0. gates that need no data
 ./run_pipeline.sh budget
 ./run_pipeline.sh test
+
+# 0b. GPU check BEFORE committing hours: verifies CUDA + bf16, finds the largest
+#     batch that fits, measures real throughput, projects wall clock, and exits
+#     non-zero on anything that would break or badly slow a long run.
+./run_pipeline.sh preflight 3000000
 
 # 1. data: CARLA expert logs -> manifests (CoC labels from privileged state)
 ./run_pipeline.sh prepare /path/to/carla_dataset
@@ -332,6 +342,19 @@ pip install -r requirements.txt
 
 Set `SUB1B_SCRATCH` to a high-capacity directory; `HF_HOME`, `TORCH_HOME` and the
 dataset caches are redirected under it automatically.
+
+### GPU settings
+
+| setting | default | why |
+|---|---|---|
+| `precision` | `bf16-mixed` | Blackwell; no loss scaler needed. Preflight blocks if it silently falls back to fp32. |
+| `allow_tf32` / `cudnn_benchmark` | on | input shape is fixed for a whole run, so autotuning pays for itself immediately |
+| `batch_size` × `accumulate_grad_batches` | 24 × 2 = **48** | SimLingo uses 6 per GPU because it *trains* its vision encoder; both of ours are frozen, so no backbone activations are kept for the backward pass and a much larger micro-batch fits. The effective batch stays at SimLingo's 48. |
+| `compile` | `null` | `torch.compile` costs minutes of warmup and a failure part-way into a multi-hour run is expensive. Turn it on once a short run has proven the model trains. |
+| `gradient_checkpointing` | `false` | only needed if preflight reports the configured batch does not fit |
+
+Run `./run_pipeline.sh preflight <frames>` to find the real maximum batch on your
+card and raise `batch_size` accordingly — it measures rather than guesses.
 
 ### Atomic verification gates
 

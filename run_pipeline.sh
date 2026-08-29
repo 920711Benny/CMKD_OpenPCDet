@@ -2,6 +2,7 @@
 # End-to-end lifecycle driver for the Sub-1B Dual-Head Diffusion VLA.
 #
 #   ./run_pipeline.sh budget            parameter-budget gate (<1B)
+#   ./run_pipeline.sh preflight [frames] GPU check + max batch + time projection
 #   ./run_pipeline.sh test              unit tests
 #   ./run_pipeline.sh prepare <dataset> CARLA logs -> training manifests
 #   ./run_pipeline.sh gen-cot <dataset> [mult]  expand the CoT pool from CARLA state
@@ -25,6 +26,9 @@ cmd="${1:-help}"; shift || true
 
 case "$cmd" in
   budget)  python3 -m sub1b_vla.tools.param_budget --config "$CONFIG" ;;
+  preflight)
+    python3 -m sub1b_vla.tools.gpu_preflight --config "$CONFIG" \
+      ${1:+--dataset-frames "$1"} --json-out "$RUN_DIR/preflight.json" ;;
   test)    python3 -m pytest sub1b_vla/tests -q ;;
   prepare) python3 -m sub1b_vla.data.prepare_carla_data --root "$1" --out "$1" ;;
   gen-cot)
