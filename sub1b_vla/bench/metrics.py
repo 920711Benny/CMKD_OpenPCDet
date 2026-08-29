@@ -105,9 +105,16 @@ def merge_runtime_metrics(m: BenchmarkMetrics, runtime_json: str | Path | None,
         traj = rt.get("trajectory", {})
         m.mean_latency_ms = traj.get("mean_ms")
         m.fps = traj.get("fps_mean")
+        dev = rt.get("device_name") or rt.get("device")
+        if dev:
+            m.notes.append(f"latency measured on {dev} (p95 "
+                           f"{traj.get('p95_ms', float('nan')):.1f} ms, "
+                           f"budget {rt.get('budget_ms')} ms)")
     if alignment_json and Path(alignment_json).exists():
         al = json.loads(Path(alignment_json).read_text())
         m.action_cot_alignment = al.get("alignment_score")
+        m.notes.append(f"Action-CoT alignment from {al.get('n', 0)} samples, "
+                       f"intent source '{al.get('intent_source', '?')}'")
     return m
 
 

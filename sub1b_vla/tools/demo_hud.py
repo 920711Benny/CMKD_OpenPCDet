@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--frames", type=int, default=40)
     ap.add_argument("--out", default="runs/hud_frames")
     ap.add_argument("--no-cot", action="store_true", help="disable the rationale worker")
+    ap.add_argument("--latency-out", default="runs/latency_report.json")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -82,6 +83,10 @@ def main():
                    "intents": sorted({r["intent"] for r in v}),
                } for k, v in sorted(per_scenario.items())}}
     (Path(args.out) / "summary.json").write_text(json.dumps(summary, indent=2))
+    # Same schema the CARLA agent writes, so `bench.run_benchmark --runtime`
+    # accepts either source.
+    Path(args.latency_out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.latency_out).write_text(json.dumps(report, indent=2))
     print(json.dumps(summary, indent=2))
     print(f"\nHUD frames -> {args.out}")
 

@@ -235,4 +235,9 @@ class AsyncVLARuntime:
             "rationale": self.cot_latency.stats(),
             "budget_ms": self.latency_budget_ms,
             "within_budget": bool(traj.get("p95_ms", float("inf")) <= self.latency_budget_ms),
+            # Recorded so a latency figure can never be read as coming from
+            # hardware it was not measured on.
+            "device": self.device.type,
+            "device_name": (torch.cuda.get_device_name(self.device)
+                            if self.device.type == "cuda" else "cpu"),
         }
