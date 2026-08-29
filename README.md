@@ -85,6 +85,86 @@ parallax and pretending otherwise would teach a geometry that does not exist.
 
 ---
 
+## 0b. Data — everything is CARLA
+
+There are exactly two data sources, and both speak CARLA's vocabulary.
+
+**1. The real SimLingo / PDM-Lite CARLA release** (use this for any reported
+result). `prepare_carla_data.py` consumes the layout the release actually ships:
+
+```
+<root>/data/<route>/measurements/XXXX.json.gz      ego + simulator state
+<root>/data/<route>/rgb/XXXX.jpg                   1024x512 front camera
+<root>/data/<route>/rgb_augmented/XXXX.jpg         re-rendered shifted view
+<root>/commentary/<route>/commentary/XXXX.json.gz  language: commentary
+<root>/drivelm/<route>/vqa/XXXX.json.gz            language: VQA
+<root>/dreamer/<route>/dreamer/XXXX.json.gz        language: instructions
+```
+
+```bash
+./run_pipeline.sh prepare database/simlingo      # or --use-augmented
+```
+
+When `rgb_augmented` is present it is preferred, because those frames are
+genuinely re-rendered and carry the exact `augmentation_translation` /
+`augmentation_rotation` the simulator used — so the waypoint correction is exact
+in both rotation *and* translation, unlike the rotation-only 2-D approximation.
+
+**2. `carla_surrogate.py`** — procedural frames that use CARLA's own vocabulary
+(scenario types from the release's chunk names, Town12/Town13, CARLA weather
+presets, RoadOption commands, the same behaviour buckets). It exists so the code
+paths, atomic gates and CI can run without a 1 TB download. It is **not** CARLA
+output, is labelled as a surrogate everywhere, and must not produce a reported
+driving number.
+
+### Balancing: SimLingo's real behaviour buckets
+
+Quoted from `simlingo_training/config/data_module/carla_bucket_v12_dreamer.yaml`
+(they sum to exactly 1.0) and implemented in `carla_buckets.py`:
+
+| bucket | weight | | bucket | weight |
+|---|---:|---|---|---:|
+| `all` | 0.082 | | `start_from_stop` | 0.07 |
+| `acceleration_negative_5` | 0.03 | | `vehicle_front` | 0.04 |
+| `acceleration_negative_1` | 0.03 | | `vehicle_side` | 0.08 |
+| `acceleration_positive_1` | 0.03 | | `leading_object_vehicle` | 0.09 |
+| `acceleration_positive_5` | 0.03 | | `leading_object_traffic.stop` | 0.07 |
+| `lateral_control_1_2` | 0.12 | | `leading_object_traffic.traffic_light` | 0.07 |
+| `lateral_control_higher_5` | 0.12 | | `leading_object_walker` | 0.05 |
+| `changed_route` | 0.08 | | `parkinglane` | 0.008 |
+
+Balancing on **behaviour** rather than scenario name is the point: a route
+labelled `SignalizedJunctionLeftTurn` spends most of its frames driving straight,
+so scenario-level balancing does not rebalance behaviour. A frame lands in
+several buckets at once (a hard brake behind a walker is in
+`acceleration_negative_5`, `leading_object_walker` and `all`) and its sampling
+weight is the **sum** over its buckets, so a frame that is rare on two axes
+outranks one that is rare on one.
+
+### The 60% CoT mix
+
+```yaml
+data:
+  train_partitions: {driving: 0.25, drivecot: 0.60, dreamer: 0.15}
+```
+
+`drivecot` covers SimLingo's commentary + DriveLM VQA; `dreamer` is instruction
+following. One consequence worth stating plainly: **only `driving` and `dreamer`
+carry trajectory targets**, so a 60% CoT mix means 40% of each batch trains the
+diffusion head. To keep trajectory supervision long-tail-weighted despite the
+smaller share, the 2:8 easy/hard split is applied *within* each sample type.
+
+Applying it globally was a bug, now fixed: language records have no trajectory
+and are never long-tail, so they absorbed the entire "easy" 20% and drove the
+driving pool to ~98% long-tail. Measured after the fix, on a prepared manifest:
+
+| target | measured |
+|---|---|
+| CoT share 60% | **60.0%** |
+| long-tail within driving 80% | **80.1%** |
+
+---
+
 ## 1. Architecture
 
 ```

@@ -6,6 +6,7 @@ non-blocking contract.
 """
 from __future__ import annotations
 
+import json
 import math
 import warnings
 
@@ -805,3 +806,79 @@ def test_route_command_never_overrides_a_hazard_intent():
             assert f.intent == SCENARIO_SEMANTICS[f.scenario][0], (
                 f"{f.scenario} intent became {f.intent}")
     assert checked > 0
+
+
+# ------------------------------------------- real SimLingo/CARLA layout prep
+def _write_simlingo_fixture(root):
+    """A tiny dataset in SimLingo's exact on-disk layout."""
+    import gzip
+
+    route = root / "data" / "Town12_Rep0_route17"
+    for sub in ("measurements", "rgb", "rgb_augmented"):
+        (route / sub).mkdir(parents=True, exist_ok=True)
+    comm = root / "commentary" / "Town12_Rep0_route17" / "commentary"
+    comm.mkdir(parents=True, exist_ok=True)
+
+    x, v = 0.0, 9.0
+    for i in range(40):
+        red = 12 <= i < 26
+        v = max(0.0, v - 3.0 * 0.2) if red else min(11.0, v + 1.0 * 0.2)
+        x += v * 0.2
+        m = {"x": float(x), "y": 0.0, "theta": 0.0, "speed": float(v), "command": 4,
+             "target_point": [float(x + 12.0), 0.0], "light_hazard": bool(red),
+             "augmentation_translation": 0.0, "augmentation_rotation": 0.0}
+        with gzip.open(route / "measurements" / f"{i:04d}.json.gz", "wt") as f:
+            json.dump(m, f)
+        for d in ("rgb", "rgb_augmented"):
+            (route / d / f"{i:04d}.jpg").write_bytes(b"\xff\xd8\xff\xdb")
+        with gzip.open(comm / f"{i:04d}.json.gz", "wt") as f:
+            json.dump({"commentary": "I brake because the light ahead is red." if red
+                       else "The road ahead is clear."}, f)
+
+
+def test_prepare_reads_the_real_simlingo_layout(tmp_path):
+    """The primary data path: gzipped measurements, sibling commentary, and
+    CARLA behaviour buckets derived from the expert's own trajectory."""
+    import subprocess
+    import sys
+
+    _write_simlingo_fixture(tmp_path)
+    r = subprocess.run(
+        [sys.executable, "-W", "ignore", "-m", "sub1b_vla.data.prepare_carla_data",
+         "--root", str(tmp_path), "--out", str(tmp_path), "--val-frac", "0.1"],
+        capture_output=True, text=True, check=False,
+    )
+    assert r.returncode == 0, r.stderr[-2000:]
+
+    train = [json.loads(l) for l in (tmp_path / "train.jsonl").read_text().splitlines()]
+    assert train, "no training records produced"
+    types = {r["sample_type"] for r in train}
+    assert "driving" in types and "drivecot" in types, types
+
+    driving = [r for r in train if r["sample_type"] == "driving"]
+    # Every driving record carries the CARLA bucket fields the sampler needs.
+    for r in driving:
+        assert r["buckets"] and r["weight"] > 0
+        assert r["town"] == "Town12"
+        assert r["image"].startswith("data/")
+    # The red-light frames must be bucketed as yielding to a traffic light.
+    assert any("leading_object_traffic.traffic_light" in r["buckets"] for r in driving)
+    # SimLingo's own commentary text is used as the rationale.
+    assert any("red" in r["causation"] for r in driving)
+
+
+def test_recorded_augmentation_correction_is_exact():
+    """rgb_augmented frames are real re-renders, so the recorded offsets give an
+    exact correction -- rotation AND translation, unlike the 2-D shift path."""
+    from sub1b_vla.data.prepare_carla_data import apply_recorded_augmentation
+
+    wps = np.stack([np.linspace(2, 22, 11), np.zeros(11)], 1).astype(np.float32)
+    same = apply_recorded_augmentation(wps, 0.0, 0.0)
+    assert np.array_equal(same, wps), "a null augmentation must be a no-op"
+
+    shifted = apply_recorded_augmentation(wps, 1.5, 0.0)
+    assert np.allclose(shifted[:, 1], -1.5), "a +1.5 m camera shift moves targets -1.5 m"
+
+    rotated = apply_recorded_augmentation(wps, 0.0, 10.0)
+    assert np.allclose(np.linalg.norm(rotated, axis=1), np.linalg.norm(wps, axis=1), atol=1e-3)
+    assert rotated[-1, 1] < -0.5, "a +10 deg camera yaw moves targets to the right"
