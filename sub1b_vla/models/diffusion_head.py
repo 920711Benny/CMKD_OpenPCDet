@@ -47,6 +47,19 @@ class NoiseSchedule(nn.Module):
         ab = self.alphas_cumprod[t].view(-1, *([1] * (xt.dim() - 1)))
         return (xt - (1 - ab).sqrt() * eps) / ab.sqrt().clamp(min=1e-8)
 
+    def velocity(self, x0: torch.Tensor, noise: torch.Tensor, t: torch.Tensor):
+        """v-parameterisation target (Salimans & Ho, 2022)."""
+        ab = self.alphas_cumprod[t].view(-1, *([1] * (x0.dim() - 1)))
+        return ab.sqrt() * noise - (1 - ab).sqrt() * x0
+
+    def from_v(self, xt: torch.Tensor, v: torch.Tensor, t: torch.Tensor):
+        """Recover (x0, eps) from a predicted velocity."""
+        ab = self.alphas_cumprod[t].view(-1, *([1] * (xt.dim() - 1)))
+        sqrt_ab, sqrt_1mab = ab.sqrt(), (1 - ab).sqrt()
+        x0 = sqrt_ab * xt - sqrt_1mab * v
+        eps = sqrt_1mab * xt + sqrt_ab * v
+        return x0, eps
+
 
 class SinusoidalTimestep(nn.Module):
     def __init__(self, dim: int):
@@ -127,11 +140,39 @@ class CoCDiffusionHead(nn.Module):
         train_steps: int = 100,
         infer_steps: int = 10,
         num_commands: int = 7,
+        wp_offset: tuple[float, float] = (20.0, 0.0),
+        wp_scale: tuple[float, float] = (20.0, 15.0),
+        clip_denoised: float = 1.0,
+        prediction_type: str = "v",
     ):
         super().__init__()
+        if prediction_type not in ("v", "epsilon"):
+            raise ValueError(f"prediction_type must be 'v' or 'epsilon', got {prediction_type!r}")
         self.pred_len = pred_len
         self.infer_steps = infer_steps
+        self.clip_denoised = clip_denoised
+        # v-parameterisation by default. With eps-prediction the x0 estimate at
+        # low SNR divides by sqrt(alpha_bar) -> 0, so a 10-step DDIM schedule --
+        # the one this agent must hit to stay above 10 Hz -- is markedly worse
+        # than a 100-step one. v-prediction is well conditioned across the whole
+        # schedule, which is what makes the short schedule usable.
+        self.prediction_type = prediction_type
         self.schedule = NoiseSchedule(train_steps)
+        # Waypoints arrive in METRES. A diffusion schedule assumes data on a
+        # roughly unit scale: on raw metres the signal dominates the noise at
+        # nearly every timestep, so eps-prediction collapses to "return the
+        # input" -- training loss goes low while sampling from pure noise
+        # diverges. Targets are mapped affinely into [-1, 1]:
+        #
+        #     normalised = (waypoints - offset) / scale
+        #
+        # Min-max rather than std normalisation on purpose: it lets the sampler
+        # clip its x0 estimate at +-1 without ever truncating a valid trajectory,
+        # which std-based scaling cannot promise (a 30 m waypoint is 6 sigma).
+        # Both are buffers, so they travel with the checkpoint -- training and
+        # inference MUST agree on them.
+        self.register_buffer("wp_offset", torch.tensor(wp_offset, dtype=torch.float32))
+        self.register_buffer("wp_scale", torch.tensor(wp_scale, dtype=torch.float32))
         self.in_proj = nn.Linear(2, dim)
         self.wp_pos = nn.Parameter(torch.randn(1, pred_len, dim) * 0.02)
         self.t_embed = SinusoidalTimestep(dim)
@@ -145,11 +186,18 @@ class CoCDiffusionHead(nn.Module):
         nn.init.zeros_(self.out_proj.bias)
 
     def denoise(self, xt, t, geo, sem, speed, target_point, command):
+        """Network output: velocity or epsilon, per `prediction_type`."""
         cond = self.t_embed(t) + self.ego(speed, target_point, command)
         h = self.in_proj(xt) + self.wp_pos
         for blk in self.blocks:
             h = blk(h, geo, sem, cond)
-        return self.out_proj(self.out_norm(h))  # predicted epsilon
+        return self.out_proj(self.out_norm(h))
+
+    def _resolve(self, xt, pred, t):
+        """(x0, eps) from whatever the network predicted."""
+        if self.prediction_type == "v":
+            return self.schedule.from_v(xt, pred, t)
+        return self.schedule.to_x0(xt, pred, t), pred
 
     def loss(self, waypoints, geo, sem, speed, target_point, command,
              x0_clamp: float = 80.0):
@@ -162,14 +210,24 @@ class CoCDiffusionHead(nn.Module):
         a 2.2 s horizon cannot physically exceed a few tens of metres.
         """
         b = waypoints.shape[0]
+        target = self.normalize(waypoints)
         t = torch.randint(0, self.schedule.num_steps, (b,), device=waypoints.device)
-        noise = torch.randn_like(waypoints)
-        xt = self.schedule.add_noise(waypoints, noise, t)
-        eps = self.denoise(xt, t, geo, sem, speed, target_point, command)
-        per_sample = F.mse_loss(eps, noise, reduction="none").mean(dim=(1, 2))
-        x0 = self.schedule.to_x0(xt, eps, t).clamp(-x0_clamp, x0_clamp)
+        noise = torch.randn_like(target)
+        xt = self.schedule.add_noise(target, noise, t)
+        pred = self.denoise(xt, t, geo, sem, speed, target_point, command)
+        goal = self.schedule.velocity(target, noise, t) if self.prediction_type == "v" else noise
+        per_sample = F.mse_loss(pred, goal, reduction="none").mean(dim=(1, 2))
+        # x0 is handed back in METRES so downstream kinematics stay physical.
+        x0_norm, _ = self._resolve(xt, pred, t)
+        x0 = self.denormalize(x0_norm).clamp(-x0_clamp, x0_clamp)
         reliability = self.schedule.alphas_cumprod[t]
         return per_sample, x0, t, reliability
+
+    def normalize(self, waypoints: torch.Tensor) -> torch.Tensor:
+        return (waypoints - self.wp_offset) / self.wp_scale
+
+    def denormalize(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.wp_scale + self.wp_offset
 
     @torch.no_grad()
     def sample(self, geo, sem, speed, target_point, command, steps: int | None = None,
@@ -183,12 +241,21 @@ class CoCDiffusionHead(nn.Module):
         ac = self.schedule.alphas_cumprod
         for i, t_val in enumerate(seq):
             t = t_val.repeat(b)
-            eps = self.denoise(x, t, geo, sem, speed, target_point, command)
-            a_t = ac[t_val].clamp(min=1e-8)
-            x0 = (x - (1 - a_t).sqrt() * eps) / a_t.sqrt()
+            pred = self.denoise(x, t, geo, sem, speed, target_point, command)
+            x0, eps = self._resolve(x, pred, t)
+            # Clip the x0 estimate to the data range at every step. At the first
+            # few steps alpha_bar is near zero, so this division amplifies any
+            # eps error without bound; unclipped DDIM diverges on an imperfect
+            # model even when the training loss is low.
+            if self.clip_denoised:
+                x0 = x0.clamp(-self.clip_denoised, self.clip_denoised)
+                # Re-derive eps from the clipped x0 so the DDIM update stays
+                # self-consistent; using the unclipped eps reintroduces the drift.
+                a_t = ac[t_val].clamp(min=1e-8)
+                eps = (x - a_t.sqrt() * x0) / (1 - a_t).sqrt().clamp(min=1e-8)
             if i + 1 < len(seq):
                 a_prev = ac[seq[i + 1]].clamp(min=1e-8)
                 x = a_prev.sqrt() * x0 + (1 - a_prev).sqrt() * eps
             else:
                 x = x0
-        return x
+        return self.denormalize(x)

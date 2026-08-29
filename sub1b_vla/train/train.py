@@ -139,7 +139,11 @@ def train(cfg, config_path: str):
 
     accum = t.get("accumulate_grad_batches", 1)
     max_steps = t["max_steps"]
-    log_path = out_dir / "train_log.jsonl"
+    # One log per run: appending successive runs into a single file silently
+    # interleaves their step counters and makes the curves unreadable.
+    run_stamp = time.strftime("%Y%m%d_%H%M%S")
+    log_path = out_dir / f"train_log_{run_stamp}.jsonl"
+    (out_dir / "latest_log").write_text(log_path.name)
     step = 0
     oom_splits = 1
     t0 = time.time()

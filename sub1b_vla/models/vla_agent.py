@@ -93,6 +93,10 @@ class DualHeadDiffusionVLA(nn.Module):
             pred_len=m["pred_len"],
             train_steps=m["diffusion_train_steps"],
             infer_steps=m["diffusion_infer_steps"],
+            wp_offset=tuple(m.get("waypoint_offset", (20.0, 0.0))),
+            wp_scale=tuple(m.get("waypoint_scale", (20.0, 15.0))),
+            clip_denoised=float(m.get("clip_denoised", 1.0)),
+            prediction_type=m.get("prediction_type", "v"),
         )
         self.dt = m.get("waypoint_dt", 0.2)
         self.x0_clamp = float(m.get("x0_clamp_m", 80.0))

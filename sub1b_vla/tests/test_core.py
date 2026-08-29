@@ -505,3 +505,89 @@ def test_hard_constraint_report_distinguishes_zero_from_unmeasured():
     violated = hard_constraint_report(BenchmarkMetrics(red_light_per_km=0.3,
                                                       sidewalk_per_km=0.0))
     assert any("VIOLATED" in line for line in violated)
+
+
+# ------------------------------------------------------ waypoint normalisation
+def test_normalize_denormalize_roundtrip():
+    head = CoCDiffusionHead(spatial_dim=8, sem_dim=8, dim=16, depth=1, heads=2,
+                            pred_len=11, train_steps=100, infer_steps=10,
+                            wp_offset=(20.0, 0.0), wp_scale=(20.0, 15.0))
+    wp = torch.randn(3, 11, 2) * torch.tensor([10.0, 4.0])
+    assert torch.allclose(head.denormalize(head.normalize(wp)), wp, atol=1e-4)
+
+
+def test_configured_scale_maps_realistic_waypoints_inside_clip_range():
+    """The sampler clips its x0 estimate at +-clip_denoised. If the configured
+    scale does not map real waypoints inside that range, valid trajectories are
+    silently truncated."""
+    head = CoCDiffusionHead(spatial_dim=8, sem_dim=8, dim=16, depth=1, heads=2,
+                            pred_len=11, train_steps=100, infer_steps=10,
+                            wp_offset=(20.0, 0.0), wp_scale=(20.0, 15.0),
+                            clip_denoised=1.0)
+    # A 2.2 s horizon: up to ~40 m forward (65 km/h) and +-14 m lateral.
+    extreme = torch.tensor([[[0.0, 0.0], [40.0, 14.0], [40.0, -14.0]]])
+    n = head.normalize(extreme)
+    assert bool((n.abs() <= head.clip_denoised).all()), \
+        f"configured scale clips real waypoints: max |normalised| = {n.abs().max():.3f}"
+
+
+def test_sampled_waypoints_stay_within_physical_bounds():
+    """Regression guard for the sampler divergence that produced 164 m spreads:
+    on an untrained head, clipping must still bound the output."""
+    head = CoCDiffusionHead(spatial_dim=8, sem_dim=8, dim=16, depth=1, heads=2,
+                            pred_len=11, train_steps=100, infer_steps=10,
+                            wp_offset=(20.0, 0.0), wp_scale=(20.0, 15.0),
+                            clip_denoised=1.0).eval()
+    wp = head.sample(torch.randn(4, 6, 8), torch.randn(4, 3, 8),
+                     torch.rand(4) * 20, torch.randn(4, 2), torch.randint(0, 7, (4,)))
+    assert bool((wp[..., 0].abs() <= 41.0).all()), "forward waypoints escaped the data range"
+    assert bool((wp[..., 1].abs() <= 16.0).all()), "lateral waypoints escaped the data range"
+
+
+def test_diffusion_recovers_a_trained_trajectory():
+    """End-to-end sanity: overfit one conditioning pair and check the sampler
+    reproduces its target. Without waypoint normalisation this fails even at a
+    near-zero training loss -- which is exactly how the bug hid."""
+    torch.manual_seed(0)
+    head = CoCDiffusionHead(spatial_dim=8, sem_dim=8, dim=64, depth=2, heads=4,
+                            pred_len=11, train_steps=100, infer_steps=10,
+                            wp_offset=(20.0, 0.0), wp_scale=(20.0, 15.0),
+                            prediction_type="v")
+    geo, sem = torch.randn(1, 6, 8), torch.randn(1, 3, 8)
+    speed, tp, cmd = torch.tensor([20.0]), torch.zeros(1, 2), torch.zeros(1, dtype=torch.long)
+    target = torch.tensor([[[i * 1.5, 0.0] for i in range(1, 12)]], dtype=torch.float32)
+
+    opt = torch.optim.AdamW(head.parameters(), lr=3e-3)
+    for _ in range(2000):
+        opt.zero_grad()
+        per, _, _, _ = head.loss(target, geo, sem, speed, tp, cmd)
+        per.mean().backward()
+        opt.step()
+
+    head.eval()
+    got = head.sample(geo, sem, speed, tp, cmd)   # the configured 10-step budget
+    err = (got - target).abs().mean().item()
+    assert err < 3.0, f"sampler did not recover the trained trajectory (mean abs err {err:.2f} m)"
+
+
+def test_v_and_epsilon_parameterisations_are_both_valid():
+    """Both heads must round-trip their own target exactly; the choice between
+    them is about conditioning at few steps, not correctness."""
+    for ptype in ("v", "epsilon"):
+        head = CoCDiffusionHead(spatial_dim=8, sem_dim=8, dim=16, depth=1, heads=2,
+                                pred_len=11, train_steps=100, infer_steps=10,
+                                prediction_type=ptype)
+        x0 = torch.randn(4, 11, 2) * 0.5
+        noise = torch.randn_like(x0)
+        t = torch.randint(0, 90, (4,))
+        xt = head.schedule.add_noise(x0, noise, t)
+        goal = head.schedule.velocity(x0, noise, t) if ptype == "v" else noise
+        rec_x0, rec_eps = head._resolve(xt, goal, t)
+        assert torch.allclose(rec_x0, x0, atol=1e-3), f"{ptype}: x0 round-trip failed"
+        assert torch.allclose(rec_eps, noise, atol=1e-3), f"{ptype}: eps round-trip failed"
+
+
+def test_invalid_prediction_type_is_rejected():
+    with pytest.raises(ValueError, match="prediction_type"):
+        CoCDiffusionHead(spatial_dim=8, sem_dim=8, dim=16, depth=1, heads=2,
+                         prediction_type="x0")

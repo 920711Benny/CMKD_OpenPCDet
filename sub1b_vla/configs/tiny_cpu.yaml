@@ -21,6 +21,15 @@ model:
   lora_dropout: 0.0
   pred_len: 11
   waypoint_dt: 0.2
+  # Waypoint normalisation (metres): (wp - offset) / scale maps into [-1, 1].
+  # Recompute for your dataset with tools.waypoint_stats -- a scale that does not
+  # cover the data gets silently clipped by the sampler.
+  waypoint_offset: [16.5, 0.0]
+  waypoint_scale: [18.5, 12.0]
+  clip_denoised: 1.0
+  # 'v' (Salimans & Ho) is well conditioned across the whole schedule;
+  # 'epsilon' degrades noticeably at the 10-step inference budget.
+  prediction_type: v
   diffusion_train_steps: 100
   diffusion_infer_steps: 10
   diffusion_dim: 64
