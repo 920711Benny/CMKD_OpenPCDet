@@ -166,6 +166,16 @@ class DualHeadDiffusionVLA(nn.Module):
         cons_loss = (cons_per_sample * cw).sum() / cw.sum().clamp(min=1e-6)
 
         rel = reliability > 0.5
+        # L_LM = next-token CE + weighted intent CE (both are language supervision;
+        # the head is a differentiable read-out of the rationale's action slot).
+        lm_total = lang.lm_loss
+        if "intent_id" in batch:
+            intent_ce = torch.nn.functional.cross_entropy(
+                lang.intent_logits.float(), batch["intent_id"].long()
+            )
+            lm_total = intent_ce * self.weights.intent_ce if lm_total is None else \
+                lm_total + self.weights.intent_ce * intent_ce
+
         extras = {
             "mean_accel": float((dyn.accel[rel].mean() if rel.any() else dyn.accel.mean()).detach()),
             "mean_final_speed": float(
@@ -175,7 +185,7 @@ class DualHeadDiffusionVLA(nn.Module):
         if "intent_id" in batch:
             pred = lang.intent_logits.argmax(-1)
             extras["intent_acc"] = float((pred == batch["intent_id"]).float().mean())
-        breakdown = combine(lang.lm_loss, diff_loss, cons_loss, self.weights, step, extras)
+        breakdown = combine(lm_total, diff_loss, cons_loss, self.weights, step, extras)
         return breakdown, {"x0": x0, "encoded": enc, "language": lang}
 
     # ---- inference -------------------------------------------------------

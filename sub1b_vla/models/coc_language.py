@@ -30,7 +30,8 @@ class LanguageOutput:
     lm_loss: torch.Tensor | None
     intent_logits: torch.Tensor      # (B, num_intents)
     hidden: torch.Tensor             # (B, T, D) final hidden states
-    pooled: torch.Tensor             # (B, D)
+    pooled: torch.Tensor             # (B, D) over the full sequence
+    pooled_prefix: torch.Tensor      # (B, D) over the visual prefix only
 
 
 class StubDecoderBlock(nn.Module):
@@ -222,29 +223,58 @@ class CoCLanguageModel(nn.Module):
         else:
             pooled = hidden.mean(dim=1)
 
+        # The intent head reads ONLY the visual prefix positions. Pooling the
+        # full sequence would let it read the intent straight out of the target
+        # text during training (a label leak) and then face a prefix-only
+        # sequence at inference -- it would learn nothing transferable.
+        pooled_prefix = hidden[:, :n_prefix].mean(dim=1)
+
         return LanguageOutput(
             lm_loss=lm_loss,
-            intent_logits=self.intent_head(pooled),
+            intent_logits=self.intent_head(pooled_prefix),
             hidden=hidden,
             pooled=pooled,
+            pooled_prefix=pooled_prefix,
         )
 
     @torch.no_grad()
     def generate(self, semantic_tokens, prompt_ids=None, max_new_tokens: int = 64):
-        """Greedy decode of the CoC rationale. Used by the async HUD stream."""
+        """Greedy decode of the CoC rationale, for the async HUD stream.
+
+        Uses KV caching on real backbones: without it each new token re-runs the
+        whole prefix, making the rationale O(n^2) and starving the control loop
+        it is supposed to stay out of the way of.
+        """
         prefix = self.in_proj(semantic_tokens)
-        if prompt_ids is not None:
-            embeds = torch.cat([prefix, self._embed_tokens(prompt_ids)], dim=1)
-        else:
-            embeds = prefix
+        embeds = prefix if prompt_ids is None else torch.cat(
+            [prefix, self._embed_tokens(prompt_ids)], dim=1)
+
+        if isinstance(self.backbone, StubCausalLM):
+            return self._generate_uncached(embeds, semantic_tokens, max_new_tokens)
+
+        out_ids: list[torch.Tensor] = []
+        past = None
+        step_embeds = embeds
+        eos = getattr(self.tokenizer, "eos_token_id", None)
+        for _ in range(max_new_tokens):
+            out = self.backbone(inputs_embeds=step_embeds, past_key_values=past,
+                                use_cache=True)
+            past = out.past_key_values
+            nxt = out.logits[:, -1].argmax(dim=-1)
+            out_ids.append(nxt)
+            if eos is not None and bool((nxt == eos).all()):
+                break
+            step_embeds = self._embed_tokens(nxt[:, None])
+        if not out_ids:
+            return torch.zeros(semantic_tokens.shape[0], 0, dtype=torch.long)
+        return torch.stack(out_ids, dim=1)
+
+    def _generate_uncached(self, embeds, semantic_tokens, max_new_tokens):
         out_ids: list[torch.Tensor] = []
         for _ in range(max_new_tokens):
             _, logits = self._run(embeds, None)
             nxt = logits[:, -1].argmax(dim=-1)
             out_ids.append(nxt)
-            if self.tokenizer is not None and self.tokenizer.eos_token_id is not None:
-                if bool((nxt == self.tokenizer.eos_token_id).all()):
-                    break
             embeds = torch.cat([embeds, self._embed_tokens(nxt[:, None])], dim=1)
         if not out_ids:
             return torch.zeros(semantic_tokens.shape[0], 0, dtype=torch.long)

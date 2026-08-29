@@ -56,6 +56,61 @@ def resolve_amp(precision: str, device: torch.device):
     return False, torch.float32
 
 
+def _split_batch(batch: dict, parts: int) -> list[dict]:
+    """Split a batch along dim 0 into `parts` micro-batches."""
+    n = next(v.shape[0] for v in batch.values() if torch.is_tensor(v))
+    size = max(1, (n + parts - 1) // parts)
+    out = []
+    for i in range(0, n, size):
+        out.append({k: (v[i:i + size] if torch.is_tensor(v) else v[i:i + size])
+                    for k, v in batch.items()})
+    return out
+
+
+def forward_backward(model, batch, step, accum, device, use_amp, amp_dtype,
+                     oom_splits: int = 1):
+    """Forward+backward with an automatic micro-batching fallback on CUDA OOM.
+
+    A single-GPU run that OOMs on an occasional large batch should degrade to
+    smaller chunks and keep the same effective batch size, not crash the job
+    hours in. Returns (breakdown, splits_used) or (None, splits) if even a
+    single-sample chunk will not fit.
+    """
+    max_splits = 8
+    while oom_splits <= max_splits:
+        try:
+            if oom_splits == 1:
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                    breakdown, _ = model(batch, step=step)
+                    loss = breakdown.total / accum
+                if not torch.isfinite(loss):
+                    return None, oom_splits
+                loss.backward()
+                return breakdown, oom_splits
+
+            chunks = _split_batch(batch, oom_splits)
+            first = None
+            for ch in chunks:
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                    b, _ = model(ch, step=step)
+                    loss = b.total / (accum * len(chunks))
+                if not torch.isfinite(loss):
+                    return None, oom_splits
+                loss.backward()
+                first = first or b
+            return first, oom_splits
+        except torch.cuda.OutOfMemoryError:
+            model.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            oom_splits *= 2
+            print(f"[step {step}] CUDA OOM; retrying with {oom_splits} micro-batches.",
+                  flush=True)
+    raise RuntimeError(
+        f"CUDA OOM persisted at {max_splits} micro-batches. Reduce train.batch_size, "
+        "model.image_size, or model.num_semantic_tokens."
+    )
+
+
 def train(cfg, config_path: str):
     setup_scratch_dirs(cfg)
     set_seed(cfg.get("seed", 0))
@@ -86,6 +141,7 @@ def train(cfg, config_path: str):
     max_steps = t["max_steps"]
     log_path = out_dir / "train_log.jsonl"
     step = 0
+    oom_splits = 1
     t0 = time.time()
     model.train()
     opt.zero_grad(set_to_none=True)
@@ -96,19 +152,17 @@ def train(cfg, config_path: str):
                 break
             batch = {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v)
                      for k, v in batch.items()}
-            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                breakdown, _ = model(batch, step=step)
-                loss = breakdown.total / accum
-
-            if not torch.isfinite(loss):
+            breakdown, oom_splits = forward_backward(
+                model, batch, step, accum, device, use_amp, amp_dtype, oom_splits
+            )
+            if breakdown is None:
                 # Divergence guard: drop the batch rather than poisoning the
                 # optimizer state with NaN/Inf gradients.
-                print(f"[step {step}] non-finite loss ({float(loss)}); skipping batch.")
+                print(f"[step {step}] non-finite loss; skipping batch.", flush=True)
                 opt.zero_grad(set_to_none=True)
                 step += 1
                 continue
 
-            loss.backward()
             if (step + 1) % accum == 0:
                 gn = torch.nn.utils.clip_grad_norm_(params, t["grad_clip"])
                 if torch.isfinite(gn):

@@ -32,6 +32,7 @@ loss:
   lm: 1.0
   diffusion: 1.0
   consistency: 0.2
+  intent_ce: 0.5
   align_warmup_steps: 2000
 
 consistency:

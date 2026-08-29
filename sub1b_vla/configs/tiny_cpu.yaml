@@ -27,7 +27,7 @@ model:
   diffusion_depth: 2
   diffusion_heads: 4
 
-loss: {lm: 1.0, diffusion: 1.0, consistency: 0.2, align_warmup_steps: 10}
+loss: {lm: 1.0, diffusion: 1.0, consistency: 0.2, intent_ce: 0.5, align_warmup_steps: 10}
 consistency: {}
 
 data:

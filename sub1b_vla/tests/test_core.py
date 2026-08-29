@@ -390,3 +390,67 @@ def test_synthetic_red_light_implies_stop_label():
             seg = np.linalg.norm(np.diff(np.vstack([[0, 0], f.waypoints]), axis=0), axis=1)
             assert seg[-1] / 0.2 < 0.3, "a stop trajectory must end at rest"
     assert seen > 0, "red_light scenario never sampled"
+
+
+def test_intent_logits_do_not_depend_on_target_text(model, cfg):
+    """Regression guard: the intent head must read only the visual prefix.
+
+    If it pooled the full sequence it could read the intent straight out of the
+    supervised rationale during training and then face a prefix-only sequence at
+    inference -- learning nothing that transfers.
+    """
+    b, s = 3, cfg["model"]["image_size"]
+    torch.manual_seed(0)
+    enc = model.encoder(torch.randn(b, 3, s, s))
+    ids = torch.randint(3, 100, (b, 16))
+    mask = torch.ones(b, 16, dtype=torch.long)
+
+    with_text = model.language(enc.semantic_tokens, text_ids=ids, text_mask=mask)
+    without = model.language(enc.semantic_tokens)
+    assert torch.allclose(with_text.intent_logits, without.intent_logits, atol=1e-5), \
+        "intent logits leaked information from the target text"
+
+
+def test_intent_supervision_is_included_in_lm_term(model, cfg):
+    """The intent CE must actually reach the loss, otherwise the head is
+    grounded only by the consistency term -- which a constant prediction
+    satisfies trivially."""
+    b, s = 4, cfg["model"]["image_size"]
+    base = {
+        "image": torch.randn(b, 3, s, s),
+        "waypoints": torch.randn(b, cfg["model"]["pred_len"], 2),
+        "speed": torch.rand(b) * 30,
+        "target_point": torch.randn(b, 2),
+        "command": torch.randint(0, 7, (b,)),
+        "has_waypoints": torch.ones(b),
+    }
+    torch.manual_seed(0)
+    with_intent, _ = model({**base, "intent_id": torch.zeros(b, dtype=torch.long)}, step=0)
+    torch.manual_seed(0)
+    without, _ = model(base, step=0)
+    assert with_intent.lm.item() != pytest.approx(without.lm.item()), \
+        "intent supervision did not reach the LM term"
+
+
+def test_generate_returns_requested_length(model, cfg):
+    b, s = 2, cfg["model"]["image_size"]
+    enc = model.encoder(torch.randn(b, 3, s, s))
+    ids = model.language.generate(enc.semantic_tokens, max_new_tokens=7)
+    assert ids.shape == (b, 7)
+
+
+def test_explain_returns_one_string_per_sample(model, cfg):
+    b, s = 2, cfg["model"]["image_size"]
+    enc = model.encoder(torch.randn(b, 3, s, s))
+    texts = model.explain(enc, max_new_tokens=5)
+    assert len(texts) == b and all(isinstance(t, str) for t in texts)
+
+
+def test_split_batch_preserves_all_samples():
+    from sub1b_vla.train.train import _split_batch
+
+    batch = {"a": torch.arange(10), "b": torch.arange(20).view(10, 2)}
+    for parts in (1, 2, 3, 4, 10):
+        chunks = _split_batch(batch, parts)
+        assert sum(c["a"].shape[0] for c in chunks) == 10
+        assert torch.equal(torch.cat([c["a"] for c in chunks]), batch["a"])

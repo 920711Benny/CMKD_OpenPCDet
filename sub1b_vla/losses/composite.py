@@ -20,6 +20,11 @@ class LossWeights:
     lm: float = 1.0
     diffusion: float = 1.0
     consistency: float = 0.2
+    # Supervised cross-entropy on the intent read-out, folded into the LM term.
+    # Without it the intent head has no grounding in the scene: the consistency
+    # loss only enforces AGREEMENT with the trajectory, which a constant
+    # prediction satisfies trivially.
+    intent_ce: float = 0.5
     align_warmup_steps: int = 2000
 
     def align_weight(self, step: int) -> float:
