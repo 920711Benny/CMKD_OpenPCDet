@@ -1112,13 +1112,13 @@ def test_effective_batch_matches_simlingo_in_every_gpu_config():
 
 
 # ------------------------------------------------------------- attention
-def test_sdpa_attention_matches_its_explicit_path():
+def test_flash_attention_matches_its_explicit_path():
     """The fused path and the weight-returning path must agree, or the HUD's
     attention map would describe different maths from the one that ran."""
-    from sub1b_vla.models.attention import SDPAAttention
+    from sub1b_vla.models.attention import FlashAttention
 
     torch.manual_seed(0)
-    attn = SDPAAttention(64, 8).eval()
+    attn = FlashAttention(64, 8).eval()
     q, kv = torch.randn(2, 10, 64), torch.randn(2, 17, 64)
     fused, w_none = attn(q, kv, kv)
     explicit, weights = attn(q, kv, kv, need_weights=True)
@@ -1127,28 +1127,28 @@ def test_sdpa_attention_matches_its_explicit_path():
     assert torch.allclose(fused, explicit, atol=1e-5)
 
 
-def test_sdpa_attention_has_the_same_parameter_count_as_nn_mha():
+def test_flash_attention_has_the_same_parameter_count_as_nn_mha():
     """Swapping the module must not move the <1B budget."""
-    from sub1b_vla.models.attention import SDPAAttention
+    from sub1b_vla.models.attention import FlashAttention
 
     d, h = 128, 8
-    mine = sum(p.numel() for p in SDPAAttention(d, h).parameters())
+    mine = sum(p.numel() for p in FlashAttention(d, h).parameters())
     ref = sum(p.numel() for p in torch.nn.MultiheadAttention(d, h, batch_first=True).parameters())
     assert mine == ref, (mine, ref)
 
 
-def test_sdpa_attention_rejects_indivisible_head_split():
-    from sub1b_vla.models.attention import SDPAAttention
+def test_flash_attention_rejects_indivisible_head_split():
+    from sub1b_vla.models.attention import FlashAttention
 
     with pytest.raises(ValueError, match="not divisible"):
-        SDPAAttention(65, 8)
+        FlashAttention(65, 8)
 
 
 def test_causal_masking_is_applied_on_both_paths():
-    from sub1b_vla.models.attention import SDPAAttention
+    from sub1b_vla.models.attention import FlashAttention
 
     torch.manual_seed(1)
-    attn = SDPAAttention(32, 4).eval()
+    attn = FlashAttention(32, 4).eval()
     x = torch.randn(1, 6, 32)
     fused, _ = attn(x, x, x, is_causal=True)
     explicit, w = attn(x, x, x, is_causal=True, need_weights=True)
@@ -1161,23 +1161,61 @@ def test_attention_backend_report_states_what_ran_not_what_is_installed():
     from sub1b_vla.models.attention import attention_backend_report
 
     rep = attention_backend_report(torch.device("cpu"))
-    assert "sdpa" in rep and "flash_attn_package" in rep
-    assert rep["sdpa"]["device"] == "cpu"
-    assert "note" in rep["sdpa"], "a CPU device must say flash is unavailable"
+    assert "flash" in rep and "flash_attn_package" in rep
+    assert rep["flash"]["device"] == "cpu"
+    assert rep["flash"]["usable"] is False
+    assert "no CPU kernel" in rep["flash"]["reason"]
 
 
-def test_attn_implementation_fallback_chain_order():
-    from sub1b_vla.models.backbones import ATTN_FALLBACK_CHAIN, _load_hf
+def test_hf_loader_requests_flash_attention_2_and_never_downgrades():
+    """sdpa and eager are not fallbacks. A silent downgrade costs several times
+    the throughput with nothing in the logs, so the loader must raise."""
+    from sub1b_vla.models.backbones import REQUIRED_ATTN_IMPLEMENTATION, _load_hf
 
-    assert ATTN_FALLBACK_CHAIN[0] == "flash_attention_2"
+    assert REQUIRED_ATTN_IMPLEMENTATION == "flash_attention_2"
     tried = []
 
-    def loader(model_id, attn_implementation=None, **kw):
+    def ok_loader(model_id, attn_implementation=None, **kw):
         tried.append(attn_implementation)
-        if attn_implementation != "eager":
-            raise ValueError(f"{attn_implementation} unsupported")
         return "loaded"
 
-    model, impl = _load_hf(loader, "some/model", "flash_attention_2")
-    assert model == "loaded" and impl == "eager"
-    assert tried == ["flash_attention_2", "sdpa", "eager"], tried
+    model, impl = _load_hf(ok_loader, "some/model", None)
+    assert (model, impl) == ("loaded", "flash_attention_2")
+    assert tried == ["flash_attention_2"], "it must not try any other implementation"
+
+
+def test_hf_loader_raises_with_actionable_message_when_flash_is_missing(monkeypatch):
+    from sub1b_vla.models import backbones
+
+    monkeypatch.setattr(backbones, "fallback_allowed", lambda: False, raising=False)
+    monkeypatch.setenv("SUB1B_ATTENTION_ALLOW_FALLBACK", "0")
+
+    def failing(model_id, attn_implementation=None, **kw):
+        raise ValueError("flash_attn not found")
+
+    with pytest.raises(RuntimeError) as err:
+        backbones._load_hf(failing, "some/model", "flash_attention_2")
+    msg = str(err.value)
+    assert "does not fall back" in msg
+    assert "flash-attn" in msg and "preflight" in msg
+
+
+def test_flash_attention_refuses_cpu_without_explicit_opt_in(monkeypatch):
+    from sub1b_vla.models.attention import FlashAttention, FlashUnavailableError
+
+    monkeypatch.setenv("SUB1B_ATTENTION_ALLOW_FALLBACK", "0")
+    attn = FlashAttention(32, 4).eval()
+    x = torch.randn(1, 5, 32)
+    with pytest.raises(FlashUnavailableError, match="FlashAttention-2 is required"):
+        attn(x, x, x)
+
+
+def test_flash_attention_runs_under_explicit_opt_in(monkeypatch):
+    from sub1b_vla.models.attention import FlashAttention
+
+    monkeypatch.setenv("SUB1B_ATTENTION_ALLOW_FALLBACK", "1")
+    attn = FlashAttention(32, 4).eval()
+    x = torch.randn(1, 5, 32)
+    out, _ = attn(x, x, x)
+    assert out.shape == (1, 5, 32)
+    assert attn.last_backend == "math_fallback", attn.last_backend

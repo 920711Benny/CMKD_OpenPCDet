@@ -345,44 +345,47 @@ dataset caches are redirected under it automatically.
 
 ### FlashAttention-2 on RTX 6000 Pro / Ubuntu 24.04
 
-Two separate things are called "flash attention", and they fail differently:
+**FlashAttention-2 is required. There is no fallback to `sdpa` or `eager`.**
+A silent downgrade is worse than a failed load: it produces a run that is quietly
+several times slower with nothing in the logs to explain it. So an unusable
+FlashAttention raises, with a message naming the fix.
 
-| | what it is | how this repo uses it |
-|---|---|---|
-| **flash-attn package** | standalone CUDA kernels | `attn_implementation: flash_attention_2` on the HuggingFace backbones |
-| **PyTorch SDPA flash backend** | built into torch | every attention module in this repo, via `F.scaled_dot_product_attention` |
+`nn.MultiheadAttention` cannot reach FlashAttention at all — its fused path is a
+separate native kernel with its own conditions and it drops to unfused math
+whenever they are not met (`need_weights=True` being the usual culprit). Every
+attention in this repo therefore goes through `models/attention.py::FlashAttention`,
+whose parameter count is **identical** to `nn.MultiheadAttention` (4d²+4d either
+way), pinned by a test so the <1B budget cannot move.
 
-**`nn.MultiheadAttention` never reaches either.** Its fused path is a separate
-native kernel with its own conditions and it falls back to unfused math whenever
-they are not met — `need_weights=True` being the usual culprit. A model built
-from `nn.MultiheadAttention` gets no benefit from an installed flash-attn, no
-matter how carefully it was compiled. Every attention here therefore goes
-through `models/attention.py::SDPAAttention`, which dispatches via SDPA and has
-**identical parameter count** to `nn.MultiheadAttention` (a test pins this, so
-the <1B budget cannot move).
+Two implementations carry the name and both are used, in this order:
 
-Attention weights are still needed for the HUD's attention maps, so that path
-exists — but explicitly and separately, because materialising the weight matrix
-is exactly what disables the flash kernel. Training uses the fused path.
+1. **`flash_attn.flash_attn_func`** — the standalone package, and what
+   HuggingFace's `attn_implementation="flash_attention_2"` requires.
+2. **PyTorch's SDPA FLASH_ATTENTION backend, pinned explicitly.** Same algorithm,
+   compiled into torch. This is *not* the `sdpa` fallback: the kernel is forced,
+   and if it cannot serve the shape the call raises rather than sliding onto math.
 
 Install (Blackwell is sm_120 and needs a CUDA 12.8+ toolchain):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu128
 MAX_JOBS=4 pip install flash-attn --no-build-isolation   # ~30-60 min from source
-./run_pipeline.sh preflight                              # verify it is ACTUALLY used
+./run_pipeline.sh preflight                              # verifies by RUNNING the kernel
 ```
 
-**Verify rather than assume.** flash-attn wheels have historically targeted
-sm80–sm90; one built for the wrong architecture imports cleanly and is then
-never used. `gpu_preflight` probes each SDPA backend *by running it* and reports
-what executed, warns when the flash backend is unusable, and prints which
-implementation each backbone actually loaded — the loader walks
-`flash_attention_2 → sdpa → eager` and records the winner, so a mismatch
-degrades visibly instead of silently costing throughput.
+Preflight runs FlashAttention rather than inspecting versions, because a
+flash-attn wheel built for the wrong compute capability imports cleanly and is
+then never used. If it is not usable, preflight reports **BLOCKER**, not a
+warning.
 
-FlashAttention needs bf16/fp16 inputs; fp32 falls back to the math backend
-silently. The `bf16-mixed` default satisfies this.
+FlashAttention exists only in fp16/bf16. On CUDA the inputs are cast to bf16 for
+the kernel and cast back — stated rather than hidden, and consistent with the
+`bf16-mixed` autocast training already uses.
+
+**Escape hatch, for CPU tests only:** `SUB1B_ATTENTION_ALLOW_FALLBACK=1` permits
+the math kernel. The test suite sets it in `tests/conftest.py`; it is never set
+in library code or a training config, and preflight treats it as a **blocker** so
+it cannot leak into a real run.
 
 ### GPU settings
 

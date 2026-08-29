@@ -138,16 +138,18 @@ def main():
     attn = attention_backend_report(device)
     print("-" * w)
     print(f"{'flash-attn package':<26}{attn['flash_attn_package']}")
-    for name, state in attn["sdpa"].get("backends", {}).items():
-        print(f"{'sdpa backend ' + name:<26}{state}")
-    if device.type == "cuda" and not attn["sdpa"].get("flash_available"):
-        warnings_.append(
-            "The SDPA flash backend is NOT usable on this device/dtype. Attention "
-            "will run on the memory-efficient or math kernel; expect a slower run.")
-    if device.type == "cuda" and not attn["flash_attn_package"]["installed"]:
-        warnings_.append(
-            "flash-attn is not installed, so attn_implementation='flash_attention_2' "
-            "will fall back to sdpa for the HuggingFace backbones.")
+    print(f"{'FlashAttention-2 usable':<26}{attn['flash'].get('usable')}"
+          f"{'  via ' + attn['flash']['backend'] if attn['flash'].get('backend') else ''}")
+    if attn["flash"].get("reason"):
+        print(f"{'reason':<26}{attn['flash']['reason']}")
+    if not attn["flash"].get("usable"):
+        problems.append(
+            "FlashAttention-2 is NOT usable here. This project requires it and does "
+            "not fall back to sdpa or eager: " + str(attn["flash"].get("reason", "")))
+    if attn["fallback_allowed"]:
+        problems.append(
+            "SUB1B_ATTENTION_ALLOW_FALLBACK=1 is set. That permits the math kernel "
+            "and exists for CPU tests only -- unset it before a real run.")
 
     model = DualHeadDiffusionVLA(cfg).to(device)
     rep = model.assert_parameter_budget()

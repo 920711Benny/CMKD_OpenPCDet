@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
+from .attention import fallback_allowed
+
 
 @dataclass
 class BackboneSpec:
@@ -71,28 +73,37 @@ _KNOWN = {
 }
 
 
-ATTN_FALLBACK_CHAIN = ("flash_attention_2", "sdpa", "eager")
+# FlashAttention-2 only. `sdpa` and `eager` are NOT fallbacks: a silent
+# downgrade produces a run that is quietly several times slower with nothing in
+# the logs to explain it, which costs more than a failed load.
+REQUIRED_ATTN_IMPLEMENTATION = "flash_attention_2"
 
 
 def _load_hf(loader, model_id: str, attn_implementation: str | None, **kw):
-    """Load a HF model, walking down the attention-implementation chain.
+    """Load a HuggingFace model with the required attention implementation.
 
-    FlashAttention-2 is requested first and the chain is walked on failure, so a
-    missing or mismatched flash-attn build degrades to sdpa instead of killing
-    the run. The implementation that actually loaded is returned, because
-    assuming flash when it silently fell back is how a run ends up slow for
-    reasons nobody can see.
+    Raises rather than degrading. The only way to load with anything else is to
+    ask for it explicitly in the config, which is then reported as-is.
     """
-    chain = (ATTN_FALLBACK_CHAIN if attn_implementation in (None, "auto")
-             else (attn_implementation,) + tuple(
-                 a for a in ATTN_FALLBACK_CHAIN if a != attn_implementation))
-    last: Exception | None = None
-    for impl in chain:
-        try:
-            return loader(model_id, attn_implementation=impl, **kw), impl
-        except Exception as exc:  # noqa: BLE001 - unsupported impl raises various types
-            last = exc
-    raise last if last else RuntimeError(f"could not load {model_id}")
+    impl = attn_implementation or REQUIRED_ATTN_IMPLEMENTATION
+    try:
+        return loader(model_id, attn_implementation=impl, **kw), impl
+    except Exception as exc:  # noqa: BLE001 - unsupported impl raises various types
+        if impl != REQUIRED_ATTN_IMPLEMENTATION:
+            raise
+        if not fallback_allowed():
+            raise RuntimeError(
+                f"Could not load {model_id} with attn_implementation="
+                f"'{REQUIRED_ATTN_IMPLEMENTATION}': {type(exc).__name__}: {exc}\n"
+                "This project does not fall back to 'sdpa' or 'eager' -- a silent\n"
+                "downgrade costs several times the throughput with nothing in the\n"
+                "logs to explain it. Install a flash-attn matching your GPU\n"
+                "(Blackwell/sm_120 needs a CUDA 12.8+ toolchain) and re-run\n"
+                "`./run_pipeline.sh preflight`, or set\n"
+                "SUB1B_ATTENTION_ALLOW_FALLBACK=1 for CPU tests only."
+            ) from exc
+        # Explicit opt-in only (CPU tests / CI).
+        return loader(model_id, **kw), "fallback-eager (opt-in)"
 
 
 def build_vision_backbone(model_id: str, image_size: int, allow_stub: bool = True,
