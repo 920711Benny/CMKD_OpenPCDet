@@ -1,0 +1,48 @@
+Enable gradient accumulation in simlingo_training/train.py
+=========================================================
+
+Why: with batch_size 4 on 2 GPUs the effective batch is 8, while SimLingo's
+lr of 3e-5 was tuned at 48. Accumulation restores batch 48 at NO extra memory,
+which is strictly better than either raising batch_size (needs memory you may
+not have) or lowering the lr (changes the optimisation).
+
+train.py currently builds the Trainer without it, so setting the key in
+config.yaml alone does nothing.
+
+--- a/simlingo_training/train.py
++++ b/simlingo_training/train.py
+@@ Trainer(
+         trainer = Trainer(
+             accelerator="gpu",
+             benchmark=True,
+             callbacks=callbacks,
+             devices=cfg.gpus,
+             gradient_clip_val=0.3,
+             logger=loggers,
+             precision=cfg.precision,
+             strategy=strategy,
+             sync_batchnorm=True,
+             max_epochs=cfg.max_epochs,
+             overfit_batches=overfit,
+             check_val_every_n_epoch=cfg.val_every_n_epochs,
++            # Effective batch = batch_size x gpus x accumulate_grad_batches.
++            # Defaults to 1 so existing configs are unaffected.
++            accumulate_grad_batches=getattr(cfg, "accumulate_grad_batches", 1),
+         )
+
+Then in config.yaml, at the TOP level (a sibling of `gpus`, not inside
+data_module):
+
+    accumulate_grad_batches: 6      # 4 x 2 GPUs x 6 = 48, == SimLingo
+
+and restore the learning rate:
+
+    model:
+      lr: 3.0e-05
+
+Check it took effect: Lightning logs the effective batch, and the number of
+optimizer steps per epoch should drop by the accumulation factor.
+
+Note gradient_clip_val=0.3 is hardcoded in train.py rather than read from the
+config. Lightning applies clipping to the ACCUMULATED gradient, so this stays
+correct under accumulation.

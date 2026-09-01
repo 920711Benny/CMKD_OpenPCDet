@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "SimLingo baseline numbers. This file ships EMPTY on purpose.",
+    "Fill it from one of two provenances and record which in 'source':",
+    "  (a) the SimLingo paper's published table for the SAME benchmark suite,",
+    "      route set and weather presets you evaluate our agent on, or",
+    "  (b) your own SimLingo reproduction run on your hardware.",
+    "Mixing suites (e.g. baseline on Bench2Drive, ours on Town05 Long) makes the",
+    "delta column meaningless. Delete keys you do not have -- the report prints",
+    "'--' for a missing metric rather than inventing one."
+  ],
+  "source": "UNSET -- fill in: paper table N / own reproduction, commit, date",
+  "num_routes": 0,
+  "notes": [
+    "state here the suite, route file, weather presets and repetition count"
+  ],
+
+  "driving_score": null,
+  "route_completion": null,
+  "infraction_score": null,
+  "collisions_per_km": null,
+  "red_light_per_km": null,
+  "sidewalk_per_km": null,
+  "action_cot_alignment": null,
+  "mean_latency_ms": null,
+  "fps": null
+}

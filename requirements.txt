@@ -1,0 +1,39 @@
+# Core (required)
+torch>=2.1
+numpy>=1.24
+pyyaml>=6.0
+
+# Backbones / tokenizers. Without these the code falls back to randomly
+# initialised stubs and says so loudly -- fine for smoke tests, not for research.
+transformers>=4.40
+accelerate>=0.30
+sentencepiece
+pillow
+
+# HUD (optional; the compositor degrades to PNG dumps without it)
+pygame>=2.5
+
+# Dev
+pytest>=7.4
+
+# --- FlashAttention-2 (optional; RTX 6000 Pro / Blackwell, Ubuntu 24.04) ------
+# Blackwell is sm_120 and needs a CUDA 12.8+ toolchain, so install a matching
+# PyTorch first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# then either a prebuilt wheel or a source build:
+#   pip install flash-attn --no-build-isolation
+# A source build needs `packaging`, `ninja` and ~30-60 min; set MAX_JOBS to
+# bound memory (MAX_JOBS=4 pip install flash-attn --no-build-isolation).
+#
+# FlashAttention-2 is REQUIRED: the code does not fall back to sdpa or eager.
+# Do NOT assume the install worked -- flash-attn wheels have historically
+# targeted sm80-sm90, and one built for the wrong architecture imports cleanly
+# and is then never used. Run
+#   ./run_pipeline.sh preflight
+# which runs the kernel and reports what actually executed. PyTorch's own
+# pinned FLASH_ATTENTION backend is used when the package is absent; that is the
+# same algorithm, not a downgrade to sdpa.
+flash-attn>=2.7.0
+
+# CARLA (install from your simulator distribution, not PyPI):
+#   carla==0.9.14  + the leaderboard / scenario_runner packages on PYTHONPATH

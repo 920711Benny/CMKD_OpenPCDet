@@ -1,0 +1,176 @@
+# Sub-1B Dual-Head Diffusion VLA -- single RTX PRO 6000 training config.
+experiment: dualhead_coc_diffusion_vla
+seed: 1337
+# Parameter budget: the project constraint is now < 3 B (raised from the original
+# < 1 B on 2026-08-29). `param_limit` is the authority and is enforced at model
+# construction; the package name still reflects the original design point.
+param_limit: 3000000000
+
+model:
+  # Language: InternVL2-1B's Qwen2-0.5B decoder ONLY. Its native 0.30B InternViT
+  # tower is dropped -- the dual-head encoder replaces it and that is what keeps
+  # the total under 1B.
+  language_model: OpenGVLab/InternVL2-1B
+  use_language_tower_only: true
+  spatial_model: facebook/dinov2-small        # geometry / depth / affordance
+  semantic_model: google/siglip-base-patch16-224   # global semantics for the LLM
+  freeze: true                    # both vision backbones frozen
+  # FlashAttention-2, strictly. There is NO fallback to sdpa or eager: a silent
+  # downgrade costs several times the throughput with nothing in the logs to
+  # explain it, so an unusable FlashAttention raises instead. Requires a CUDA
+  # device and fp16/bf16 (satisfied by the bf16-mixed autocast).
+  # `./run_pipeline.sh preflight` verifies it by running the kernel.
+  attn_implementation: flash_attention_2
+  allow_stub: true                # fall back to random ViT if weights unavailable
+  embed_dim: 896                  # == Qwen2-0.5B hidden size
+  spatial_dim: 256
+  num_semantic_tokens: 32
+  image_size: 224
+  # LoRA settings match SimLingo's simlingo_seed1.yaml exactly, so the
+  # adaptation capacity is comparable and the delta is attributable to the
+  # architecture rather than to a differently-tuned adapter.
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.1
+  pred_len: 11                    # waypoints
+  waypoint_dt: 0.2                # s between waypoints (2.2 s horizon)
+  # Waypoint normalisation (metres): (wp - offset) / scale maps into [-1, 1].
+  # Recompute for your dataset with tools.waypoint_stats -- a scale that does not
+  # cover the data gets silently clipped by the sampler.
+  waypoint_offset: [20.0, 0.0]
+  waypoint_scale: [20.0, 15.0]
+  clip_denoised: 1.0
+  # 'v' (Salimans & Ho) is well conditioned across the whole schedule;
+  # 'epsilon' degrades noticeably at the 10-step inference budget.
+  prediction_type: v
+  diffusion_train_steps: 100
+  diffusion_infer_steps: 10
+  diffusion_dim: 256
+  diffusion_depth: 4
+  diffusion_heads: 8
+
+loss:
+  lm: 1.0
+  diffusion: 1.0
+  consistency: 0.2
+  intent_ce: 0.5
+  align_warmup_steps: 2000
+
+consistency:
+  stop_speed: 0.3
+  decel: -0.5
+  accel: 0.5
+  keep_accel_band: 1.0
+  turn_heading: 0.15
+  lane_change_lateral: 1.5
+  straight_lateral: 1.0
+
+data:
+  root: ./data
+  # SimLingo-style dataset mixing. `driving` = expert trajectories,
+  # `drivecot` = QA/commentary (language only), `dreamer` = instruction
+  # following, including instructions that must be REFUSED on safety grounds.
+  # 60% Chain-of-Thought supervision, as specified for this thesis. The
+  # remaining 40% splits between expert trajectories and instruction following.
+  # `drivecot` covers SimLingo's commentary + DriveLM VQA; `dreamer` is
+  # instruction following. Note the trade-off: only `driving` and `dreamer`
+  # carry trajectory targets, so a 60% CoT mix means 40% of each batch trains
+  # the diffusion head. The 2:8 long-tail split is applied WITHIN those types,
+  # so trajectory supervision stays long-tail-weighted despite the smaller share.
+  train_partitions:
+    driving: 0.25
+    drivecot: 0.60
+    dreamer: 0.15
+  drivecot_weight: 0.4            # shorthand fallback if train_partitions is unset
+  use_safety_flag: true
+  easy_hard_split_2to8: true      # 20% easy / 80% long-tail
+  scenario_bucketing: true
+  img_augmentation: true
+  cut_bottom_quarter: true        # drop ego hood/bonnet rows
+  route_as: target_point_command
+  img_augmentation_prob: 0.5      # SimLingo DatasetBaseConfig
+  img_shift_augmentation: true    # lateral/yaw jitter for recovery behaviour
+  img_shift_augmentation_prob: 0.5
+  hist_len: 1                     # single frame, as SimLingo
+  skip_first_n_frames: 10         # drop each route's settling frames
+  num_route_points: 20
+  # Generate Chain-of-Causation labels from privileged CARLA state
+  # (bounding boxes + measurements) rather than only consuming the
+  # release's language files. Each generated label is verified against
+  # the expert trajectory and dropped if it does not hold.
+  generate_cot: true
+  qa_probability: 0.35
+  use_commentary: true
+  use_qa: true
+  qa_augmentation: true
+  max_text_len: 96
+  # CARLA-schema surrogate frames (carla_surrogate.py). Real training must
+  # use the prepared SimLingo manifests; the surrogate is for code paths,
+  # atomic gates and CI only.
+  carla_surrogate: false
+  surrogate_size: 512
+
+train:
+  # Optimiser settings mirror SimLingo's DrivingModelConfig / simlingo_seed1.yaml
+  # (lr 3e-5, weight_decay 0.1, betas (0.9, 0.999), pct_start 0.05) so a
+  # comparison against that baseline is not confounded by the optimiser.
+  #
+  # Deliberate divergences, all forced by the single-GPU target:
+  #   precision   bf16-mixed, not SimLingo's 16-mixed  (Blackwell; no loss scaler)
+  #   strategy    auto/single device, not deepspeed_stage_2 (that is for 8 GPUs)
+  #   batch       6 x accum 8 = 48 effective, matching SimLingo's 6 x 8 GPUs
+  precision: bf16-mixed
+  strategy: auto
+  devices: 1
+  # GPU accelerations. TF32 and cuDNN autotuning are safe here: the input shape
+  # is fixed for a whole run, and the model already trains under bf16 autocast,
+  # so TF32 is not the limiting numerical factor.
+  allow_tf32: true
+  cudnn_benchmark: true
+  # torch.compile is OFF by default: it costs minutes of warmup and a failure
+  # part-way into a multi-hour run is expensive. Turn it on ("default" or
+  # "max-autotune") once a short run has proven the model trains.
+  compile: null
+  # Only needed if gpu_preflight reports the configured batch does not fit.
+  gradient_checkpointing: false
+  # SimLingo uses 6 per GPU because it TRAINS its vision encoder. Both of ours
+  # are frozen, so no backbone activations are kept for the backward pass and a
+  # much larger micro-batch fits. Effective batch stays at SimLingo's 48.
+  # Run gpu_preflight to find the real maximum on your card and raise this.
+  batch_size: 24
+  accumulate_grad_batches: 2      # -> effective batch 48, == SimLingo's 6 x 8
+  num_workers: 8
+  # Epoch-based like SimLingo (max_epochs: 15). max_steps caps a run when you
+  # want a fixed budget; set it to 0 to run purely by epochs.
+  max_epochs: 15
+  max_steps: 0
+  lr: 3.0e-5
+  min_lr: 1.0e-7
+  weight_decay: 0.1
+  betas: [0.9, 0.999]
+  pct_start: 0.05                 # warmup fraction, as SimLingo
+  warmup_steps: 0                 # 0 => derive from pct_start
+  grad_clip: 1.0
+  log_every: 50
+  ckpt_every: 2000
+  val_every_n_epochs: 2
+  out_dir: ./runs
+
+sensors:
+  # CARLA standard front RGB rig.
+  rgb_front:
+    x: 1.3
+    y: 0.0
+    z: 2.3
+    pitch: -5.0
+    roll: 0.0
+    yaw: 0.0
+    fov: 100
+    width: 1024
+    height: 512
+
+inference:
+  control_hz: 10                  # trajectory loop target
+  latency_budget_ms: 80
+  cot_hz: 1                       # async rationale refresh
+  controller: pure_pursuit_pid

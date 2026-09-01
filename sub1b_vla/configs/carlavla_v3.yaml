@@ -1,0 +1,116 @@
+# Mirror of the CarlaVLA v3 hydra config (carlavla_v3_diffusion_cfg_10ep),
+# translated into this repo's schema so param_budget / gpu_preflight /
+# compute_budget / config_audit can be run against it.
+#
+# Values are copied from that config, NOT re-tuned. Where this repo has no
+# equivalent knob the original value is recorded in a comment so nothing is
+# silently dropped.
+experiment: carlavla_v3_diffusion_cfg_10ep
+seed: 9876
+# Parameter budget: the project constraint is now < 3 B (raised from the original
+# < 1 B on 2026-08-29). `param_limit` is the authority and is enforced at model
+# construction; the package name still reflects the original design point.
+param_limit: 3000000000
+
+model:
+  language_model: OpenGVLab/InternVL2-1B
+  use_language_tower_only: true
+  # variant: dual_vision  ->  DINOv2-large (query) x SigLIP-so400m (key/value)
+  spatial_model: pretrained/dinov2-large
+  semantic_model: pretrained/siglip-so400m
+  freeze: true
+  allow_stub: true
+  attn_implementation: flash_attention_2
+  embed_dim: 896
+  spatial_dim: 256
+  num_semantic_tokens: 32       # original: FIXED_GRID 16x16 = 256 fused tokens
+  image_size: 224               # original: DINOv2 518 crop / SigLIP 384
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.1
+  pred_len: 11
+  waypoint_dt: 0.2
+  waypoint_offset: [20.0, 0.0]  # original: coord_min_max (-32, 32) symmetric
+  waypoint_scale: [20.0, 15.0]
+  clip_denoised: 1.0
+  prediction_type: v            # original: epsilon -- see README for the measurement
+  diffusion_train_steps: 100
+  diffusion_infer_steps: 10
+  diffusion_dim: 256
+  diffusion_depth: 4
+  diffusion_heads: 8
+
+loss:
+  lm: 1.0
+  diffusion: 1.0
+  consistency: 0.2
+  intent_ce: 0.5
+  align_warmup_steps: 2000
+
+consistency:
+  stop_speed: 0.3
+  decel: -0.5
+  accel: 0.5
+  keep_accel_band: 1.0
+  turn_heading: 0.15
+  lane_change_lateral: 1.5
+  straight_lateral: 1.0
+
+data:
+  root: ./database
+  # Faithful mirror: drivecot_weight 0.4 and dreamer_dataset: null, so the audit
+  # reports the same gaps the original config has rather than quietly fixing them.
+  train_partitions:
+    driving: 0.60
+    drivecot: 0.40
+  drivecot_weight: 0.4
+  use_safety_flag: true
+  easy_hard_split_2to8: true
+  scenario_bucketing: true   # original train_partitions: null (no bucket weights)
+  img_augmentation: true
+  img_augmentation_prob: 0.5
+  img_shift_augmentation: false
+  img_shift_augmentation_prob: 0.5
+  cut_bottom_quarter: true
+  hist_len: 1
+  skip_first_n_frames: 10
+  num_route_points: 20
+  route_as: target_point_command
+  use_commentary: true
+  use_qa: true
+  qa_augmentation: true
+  generate_cot: true
+  qa_probability: 0.35
+  max_text_len: 96
+  carla_surrogate: false
+  surrogate_size: 512
+
+train:
+  precision: 16-mixed         # original; bf16-mixed is preferable on Blackwell
+  strategy: auto              # original: deepspeed_stage_2 across gpus: 2
+  devices: 2
+  allow_tf32: true
+  cudnn_benchmark: true
+  compile: null
+  gradient_checkpointing: false
+  batch_size: 4               # original; x2 GPUs -> effective 8
+  accumulate_grad_batches: 1
+  num_workers: 0              # original
+  max_epochs: 10
+  max_steps: 0
+  lr: 3.0e-5
+  min_lr: 1.0e-7
+  weight_decay: 0.1
+  betas: [0.9, 0.999]
+  pct_start: 0.05
+  warmup_steps: 0
+  grad_clip: 1.0
+  log_every: 50
+  ckpt_every: 2500            # original checkpoint_every_n_steps
+  val_every_n_epochs: 5
+  out_dir: ./runs
+
+sensors:
+  rgb_front: {x: 1.3, y: 0.0, z: 2.3, pitch: -5.0, roll: 0.0, yaw: 0.0, fov: 100, width: 1024, height: 512}
+
+inference: {control_hz: 10, latency_budget_ms: 80, cot_hz: 1, controller: pure_pursuit_pid}
